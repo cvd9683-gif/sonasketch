@@ -1,0 +1,23 @@
+# Render Blueprint: one-click deploy.
+# After pushing the repo to GitHub, click "New + → Blueprint" in Render,
+# point it at the repo, and Render will read this file and provision
+# the service automatically.
+#
+# The free plan sleeps after ~15 min of inactivity and cold-starts on
+# the next request (a few seconds). Fine for a prototype; upgrade if
+# you want always-on.
+
+services:
+  - type: web
+    name: sonasketch
+    runtime: node
+    plan: free
+    autoDeploy: true
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: NODE_ENV
+        value: production

@@ -1,0 +1,986 @@
+:root {
+  --bg-0: #07080d;
+  --bg-1: #0d1018;
+  --bg-2: #141826;
+  --fg: #e8eaf2;
+  --fg-dim: #8a8fa3;
+  --accent: #7ee2ff;
+  --accent-2: #c97bff;
+  --accent-3: #ff8ec7;
+  --accent-4: #ffd97e;
+  --border: rgba(255, 255, 255, 0.08);
+  /* Height of the top "room bar". Other overlays anchor below it via
+     calc(var(--row-h) + offset), so changing this here moves everything. */
+  --row-h: clamp(80px, 11vh, 104px);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  background: radial-gradient(ellipse at top, #11142a 0%, #07080d 60%);
+  color: var(--fg);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--fg);
+  padding: 0.75rem 1.25rem;
+  border-radius: 999px;
+  font-size: 0.95rem;
+  letter-spacing: 0.02em;
+  transition: background 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+}
+
+button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #0a0c14;
+  border: none;
+  font-weight: 600;
+}
+
+button.primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+input {
+  font-family: inherit;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 0.75rem 1rem;
+  border-radius: 12px;
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.18s ease;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+input:focus {
+  border-color: var(--accent);
+}
+
+.app {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ---------- Landing ---------- */
+.landing {
+  position: absolute;
+  inset: 0;
+  background: #07080d;
+  overflow: hidden;
+}
+
+.landing .landing-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  z-index: 0;
+  filter: blur(1.2px);
+  opacity: 0.6;
+}
+
+.landing .landing-foreground {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  gap: 1.4rem;
+  text-align: center;
+}
+
+/* Soft radial glass behind the centered text — keeps it readable against
+   the moving background traces without imposing a visible card edge. */
+.landing .landing-glass {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(720px, 90vw);
+  height: min(540px, 80vh);
+  transform: translate(-50%, -50%);
+  background: radial-gradient(
+    ellipse at center,
+    rgba(7, 8, 13, 0.55) 0%,
+    rgba(7, 8, 13, 0.35) 45%,
+    rgba(7, 8, 13, 0) 75%
+  );
+  filter: blur(6px);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.landing .title {
+  font-size: clamp(3rem, 7vw, 5.4rem);
+  font-weight: 300;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #fff, var(--accent) 50%, var(--accent-2));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  text-shadow: 0 0 40px rgba(126, 226, 255, 0.18);
+}
+
+.landing .subtitle {
+  color: var(--fg);
+  font-size: clamp(1rem, 1.6vw, 1.2rem);
+  max-width: 32rem;
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+  opacity: 0.92;
+}
+
+.landing .description {
+  color: var(--fg-dim);
+  font-size: 0.95rem;
+  line-height: 1.85;
+  letter-spacing: 0.02em;
+  max-width: 32rem;
+  margin-top: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+
+.landing .actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 0.6rem;
+}
+
+.landing .join-form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.6rem;
+}
+
+/* ---------- Name entry ---------- */
+.name-entry {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+
+.name-entry-card {
+  width: min(440px, 100%);
+  background: rgba(13, 16, 24, 0.78);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 2rem 1.85rem 1.6rem;
+  backdrop-filter: blur(14px);
+  box-shadow: 0 30px 80px -30px rgba(126, 226, 255, 0.18);
+}
+
+.name-entry-eyebrow {
+  font-size: 0.7rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin-bottom: 0.6rem;
+}
+
+.name-entry-title {
+  font-weight: 300;
+  font-size: 1.5rem;
+  letter-spacing: -0.01em;
+  background: linear-gradient(135deg, #fff, var(--accent));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.name-entry-sub {
+  margin-top: 0.45rem;
+  color: var(--fg-dim);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.name-entry-form {
+  margin-top: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.name-entry-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.name-entry-field span {
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+.name-entry-field input {
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
+.name-entry-actions {
+  margin-top: 0.5rem;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+/* ---------- Calibration ---------- */
+.calibration {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 1.25rem;
+  padding: 2rem;
+}
+
+.calibration h2 {
+  font-weight: 400;
+  font-size: 1.25rem;
+  letter-spacing: -0.01em;
+}
+
+.calibration .calibration-tagline {
+  margin-top: 0.2rem;
+  color: var(--fg-dim);
+  font-size: 0.9rem;
+  letter-spacing: 0.01em;
+  font-style: italic;
+}
+
+.calibration .preview-shell {
+  position: relative;
+  margin: 0 auto;
+  width: min(720px, 90vw);
+  aspect-ratio: 4 / 3;
+  border-radius: 18px;
+  overflow: hidden;
+  background: #000;
+  border: 1px solid var(--border);
+  box-shadow: 0 30px 80px -30px rgba(126, 226, 255, 0.18);
+}
+
+.calibration video,
+.calibration canvas.overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Video is mirrored for natural selfie view; overlay canvas is NOT mirrored
+   because MediaPipe's selfieMode already returns mirrored landmark coords. */
+.calibration video {
+  transform: scaleX(-1);
+}
+
+.calibration canvas.overlay {
+  pointer-events: none;
+}
+
+.calibration .debug {
+  position: absolute;
+  left: 1rem;
+  bottom: 1rem;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6rem 0.85rem;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--accent);
+  backdrop-filter: blur(8px);
+}
+
+.calibration .debug .debug-divider {
+  height: 1px;
+  margin: 0.4rem 0;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.calibration .cam-warning {
+  margin: 0.6rem 0;
+  padding: 0.7rem 0.9rem;
+  border-radius: 10px;
+  background: rgba(255, 217, 126, 0.08);
+  border: 1px solid rgba(255, 217, 126, 0.4);
+  color: var(--fg);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+.calibration .cam-warning code {
+  background: rgba(0, 0, 0, 0.35);
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  font-family: ui-monospace, monospace;
+  font-size: 0.78rem;
+}
+.calibration .cam-warning.error {
+  background: rgba(255, 109, 142, 0.1);
+  border-color: rgba(255, 109, 142, 0.5);
+}
+
+.calibration .enable-cam-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 1rem;
+  background: rgba(7, 8, 13, 0.78);
+  backdrop-filter: blur(6px);
+  text-align: center;
+  z-index: 5;
+}
+.calibration .enable-cam-btn {
+  padding: 0.85rem 1.6rem;
+  font-size: 1rem;
+}
+.calibration .enable-cam-hint {
+  max-width: 32ch;
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+}
+.calibration .cam-error-msg {
+  max-width: 36ch;
+  color: #ff6d8e;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.calibration .footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.calibration .footer .role-pill {
+  padding: 0.5rem 0.9rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+  font-size: 0.8rem;
+  color: var(--fg-dim);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* ---------- Canvas page ----------
+   Layout model:
+     - .canvas-page is the viewport container; canvas.stage is a full-bleed
+       backdrop everything else floats over.
+     - .participant-row is full-width sticky at the top (height = --row-h).
+     - .self-view floats top-right just under the row, FaceTime-style.
+     - .controls live bottom-left; .debug-panel lives top-left under the row.
+     - All overlays use absolute positioning so the canvas can fill the
+       entire viewport — drawings under the translucent participant row are
+       intentionally still visible (faintly) to reinforce the shared space.
+*/
+.canvas-page {
+  position: absolute;
+  inset: 0;
+}
+
+.canvas-page canvas.stage {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* ===== Top "room bar" — full-width participant strip ===== */
+.canvas-page .participant-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--row-h);
+  display: flex;
+  align-items: stretch;
+  gap: 0.65rem;
+  padding: 0.55rem 0.9rem;
+  background: linear-gradient(
+    to bottom,
+    rgba(7, 8, 13, 0.85),
+    rgba(7, 8, 13, 0.55) 70%,
+    rgba(7, 8, 13, 0)
+  );
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--border);
+  z-index: 5;
+}
+
+.canvas-page .room-chip,
+.canvas-page .hint-chip {
+  flex: 0 0 auto;
+  background: rgba(10, 12, 22, 0.55);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.5rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+}
+
+/* ===== Create / Edit mode segmented toggle ===== */
+.canvas-page .mode-toggle {
+  flex: 0 0 auto;
+  align-self: center;
+  display: inline-flex;
+  background: rgba(10, 12, 22, 0.6);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px;
+}
+
+.canvas-page .mode-toggle button {
+  background: transparent;
+  border: none;
+  color: var(--fg-dim);
+  padding: 0.42rem 0.9rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  letter-spacing: 0.05em;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.canvas-page .mode-toggle button:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--fg);
+}
+
+.canvas-page .mode-toggle button.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #0a0c14;
+  font-weight: 600;
+}
+
+.canvas-page .mode-toggle button .key {
+  font-family: ui-monospace, monospace;
+  font-size: 0.6rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--fg-dim);
+  letter-spacing: 0;
+}
+
+.canvas-page .mode-toggle button.active .key {
+  border-color: rgba(0, 0, 0, 0.3);
+  color: rgba(10, 12, 20, 0.7);
+}
+
+.canvas-page .room-chip .label,
+.canvas-page .hint-chip .hint-sub {
+  font-size: 0.62rem;
+  letter-spacing: 0.18em;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+}
+
+.canvas-page .room-chip .code {
+  font-family: ui-monospace, monospace;
+  font-size: 1rem;
+  letter-spacing: 0.22em;
+  color: var(--fg);
+  margin-top: 0.1rem;
+}
+
+.canvas-page .room-chip {
+  position: relative;
+}
+
+.canvas-page .live-dot {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.55rem;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #444;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
+}
+.canvas-page .live-dot.on {
+  background: #6dffb1;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35), 0 0 8px rgba(109, 255, 177, 0.7);
+}
+
+.canvas-page .share-chip {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.05rem;
+  padding: 0.45rem 0.7rem;
+  background: rgba(126, 226, 255, 0.08);
+  border: 1px solid rgba(126, 226, 255, 0.35);
+  border-radius: 10px;
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: background 120ms;
+}
+.canvas-page .share-chip:hover {
+  background: rgba(126, 226, 255, 0.16);
+}
+.canvas-page .share-chip .share-label {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: rgba(255, 255, 255, 0.55);
+}
+.canvas-page .share-chip .share-url {
+  font-family: ui-monospace, monospace;
+  font-size: 0.78rem;
+  color: #7ee2ff;
+  letter-spacing: 0.02em;
+}
+
+.canvas-page .hint-chip {
+  text-align: right;
+}
+
+.canvas-page .hint-chip .hint-title {
+  font-size: 0.82rem;
+  color: var(--fg);
+  letter-spacing: 0.04em;
+}
+
+.canvas-page .hint-chip .hint-sub {
+  margin-top: 0.15rem;
+}
+
+/* Tiles area takes the rest of the row, scrolls horizontally if it overflows */
+.canvas-page .tiles-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 0.55rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+  padding: 0 0.15rem;
+}
+
+.canvas-page .tiles-scroll::-webkit-scrollbar {
+  height: 4px;
+}
+.canvas-page .tiles-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 2px;
+}
+
+.canvas-page .participant-tile {
+  flex: 0 0 auto;
+  width: clamp(108px, 12vw, 134px);
+  display: flex;
+  flex-direction: column;
+  background: rgba(10, 12, 22, 0.6);
+  border: 2px solid var(--tile-color, var(--accent));
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.4),
+    0 0 14px -4px var(--tile-color, var(--accent)),
+    0 12px 32px -16px rgba(0, 0, 0, 0.7);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.canvas-page .participant-tile.is-local {
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.4),
+    0 0 22px -3px var(--tile-color, var(--accent)),
+    0 12px 32px -16px rgba(0, 0, 0, 0.7);
+}
+
+.canvas-page .participant-tile .tile-camera {
+  flex: 1 1 auto;
+  position: relative;
+  min-height: 0;
+  background: #000;
+}
+
+.canvas-page .participant-tile .tile-camera video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);
+  display: block;
+}
+
+.canvas-page .participant-tile .tile-placeholder {
+  position: absolute;
+  inset: 0;
+}
+
+.canvas-page .participant-tile .tile-info {
+  flex: 0 0 auto;
+  padding: 0.25rem 0.55rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+  background: rgba(0, 0, 0, 0.45);
+  min-width: 0;
+}
+
+.canvas-page .participant-tile .tile-name {
+  font-size: 0.72rem;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: 0.01em;
+}
+
+.canvas-page .participant-tile .tile-you {
+  color: var(--fg-dim);
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+}
+
+.canvas-page .participant-tile .tile-status {
+  font-size: 0.62rem;
+  font-family: ui-monospace, monospace;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ===== Self-view — floating bottom-right camera (FaceTime-style) ===== */
+.canvas-page .self-view {
+  position: absolute;
+  bottom: 1.25rem;
+  right: 1.25rem;
+  width: clamp(220px, 26vw, 320px);
+  aspect-ratio: 4 / 3;
+  background: #000;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 2px solid var(--user-color, var(--accent));
+  box-shadow:
+    0 0 36px -6px var(--user-color, var(--accent)),
+    0 24px 60px -20px rgba(0, 0, 0, 0.7);
+  z-index: 4;
+}
+
+.canvas-page .self-view video,
+.canvas-page .self-view > canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Mirror the video for selfie feel; landmarks (overlay canvas) come from
+   MediaPipe selfieMode and are already mirrored, so the canvas stays unflipped. */
+.canvas-page .self-view video {
+  transform: scaleX(-1);
+}
+
+.canvas-page .self-view-tracking {
+  position: absolute;
+  top: 0.5rem;
+  left: 0.5rem;
+  font-size: 0.7rem;
+  font-family: ui-monospace, monospace;
+  color: var(--fg);
+  background: rgba(0, 0, 0, 0.55);
+  padding: 0.15rem 0.45rem;
+  border-radius: 5px;
+  z-index: 2;
+}
+
+.canvas-page .self-view-label {
+  position: absolute;
+  bottom: 0.55rem;
+  left: 0.55rem;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  border-radius: 8px;
+  padding: 0.3rem 0.55rem;
+  display: inline-flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  z-index: 3;
+}
+
+.canvas-page .self-view-name {
+  font-size: 0.78rem;
+  color: var(--fg);
+  letter-spacing: 0.02em;
+}
+
+.canvas-page .self-view-status {
+  font-family: ui-monospace, monospace;
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+}
+
+/* ===== Controls (bottom-left) ===== */
+.canvas-page .controls {
+  position: absolute;
+  bottom: 1.25rem;
+  left: 1.25rem;
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  z-index: 5;
+  max-width: calc(100vw - 2.5rem);
+}
+
+/* ===== Active sound layers indicator (top-right under participant row) ===== */
+.canvas-page .layer-indicator {
+  position: absolute;
+  top: calc(var(--row-h) + 1rem);
+  right: 1.25rem;
+  z-index: 4;
+  background: rgba(10, 12, 22, 0.62);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.55rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.1rem;
+  pointer-events: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.canvas-page .layer-indicator.at-cap {
+  border-color: rgba(255, 142, 199, 0.55);
+  box-shadow: 0 0 18px -2px rgba(255, 142, 199, 0.45);
+}
+
+.canvas-page .layer-indicator .layer-label {
+  font-size: 0.6rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+.canvas-page .layer-indicator .layer-count {
+  font-family: ui-monospace, monospace;
+  font-size: 1rem;
+  color: var(--fg);
+  letter-spacing: 0.06em;
+}
+
+.canvas-page .layer-indicator .layer-count b {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.canvas-page .layer-indicator.at-cap .layer-count b {
+  color: var(--accent-3);
+}
+
+/* ===== Debug panel (top-left, under participant row) ===== */
+.canvas-page .debug-panel {
+  position: absolute;
+  top: calc(var(--row-h) + 1rem);
+  left: 1.25rem;
+  background: rgba(0, 0, 0, 0.62);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(10px);
+  border-radius: 12px;
+  padding: 0.65rem 0.9rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.7rem;
+  color: var(--fg-dim);
+  z-index: 4;
+  display: grid;
+  grid-template-columns: auto;
+  gap: 0.25rem;
+  width: clamp(240px, 22vw, 280px);
+  max-height: calc(100vh - var(--row-h) - 6rem);
+  overflow-y: auto;
+  pointer-events: none;
+}
+
+.canvas-page .debug-panel .row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  white-space: nowrap;
+}
+
+.canvas-page .debug-panel .row span {
+  color: var(--fg-dim);
+  min-width: 7rem;
+}
+
+.canvas-page .debug-panel .row b {
+  color: var(--accent);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.canvas-page .debug-panel .row.separator {
+  grid-column: 1 / -1;
+  padding-top: 0.35rem;
+  margin-top: 0.2rem;
+  border-top: 1px solid var(--border);
+}
+
+.canvas-page .debug-panel .row.separator span {
+  color: var(--fg);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 0.68rem;
+}
+
+.canvas-page .debug-panel .row.separator b {
+  color: var(--fg-dim);
+}
+
+.canvas-page .debug-panel .notes-row {
+  grid-column: 1 / -1;
+  white-space: normal;
+}
+
+.canvas-page .debug-panel .notes-row b {
+  color: var(--accent-3);
+}
+
+/* ===== Responsive breakpoints ===== */
+
+/* Tablet & small laptop: shrink tiles + self-view */
+@media (max-width: 960px) {
+  :root {
+    --row-h: 88px;
+  }
+  .canvas-page .participant-tile {
+    width: 102px;
+  }
+  .canvas-page .self-view {
+    width: clamp(180px, 30vw, 250px);
+    right: 1rem;
+    bottom: 1rem;
+  }
+  .canvas-page .room-chip,
+  .canvas-page .hint-chip {
+    padding: 0.4rem 0.7rem;
+  }
+  .canvas-page .room-chip .code {
+    font-size: 0.88rem;
+  }
+}
+
+/* Phone-ish: shrink everything, hide hint chip + debug panel for breathing room */
+@media (max-width: 640px) {
+  :root {
+    --row-h: 78px;
+  }
+  .canvas-page .participant-tile {
+    width: 90px;
+  }
+  .canvas-page .participant-tile .tile-name {
+    font-size: 0.66rem;
+  }
+  .canvas-page .participant-tile .tile-status {
+    font-size: 0.58rem;
+  }
+  .canvas-page .self-view {
+    width: clamp(140px, 38vw, 190px);
+    right: 0.6rem;
+    bottom: 0.6rem;
+    border-radius: 12px;
+  }
+  .canvas-page .self-view-label {
+    bottom: 0.35rem;
+    left: 0.35rem;
+    padding: 0.2rem 0.4rem;
+  }
+  .canvas-page .self-view-name { font-size: 0.7rem; }
+  .canvas-page .self-view-status { font-size: 0.6rem; }
+  .canvas-page .hint-chip {
+    display: none; /* trade-off: hint is implicit by now */
+  }
+  .canvas-page .mode-toggle button .key { display: none; }
+  .canvas-page .mode-toggle button { padding: 0.36rem 0.7rem; font-size: 0.72rem; }
+  .canvas-page .debug-panel {
+    display: none; /* desktop diagnostic only */
+  }
+  .canvas-page .controls {
+    bottom: 0.75rem;
+    left: 0.75rem;
+  }
+  .canvas-page .controls button {
+    padding: 0.55rem 0.9rem;
+    font-size: 0.85rem;
+  }
+  .canvas-page .layer-indicator {
+    top: calc(var(--row-h) + 0.6rem);
+    right: 0.6rem;
+    padding: 0.4rem 0.6rem;
+  }
+  .canvas-page .layer-indicator .layer-count {
+    font-size: 0.85rem;
+  }
+}
