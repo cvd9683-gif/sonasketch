@@ -134,12 +134,11 @@ function ShareLinkChip() {
   )
 }
 
-// ParticipantTile renders the local user with a real video (passed via
-// `videoEl` ref-callback so we can srcObject-share the camera stream),
-// and renders mock/remote users as a colored gradient placeholder.
-// Border + status text use the participant's color so a glance ties
+// ParticipantTile renders one participant. Local user gets the live camera;
+// remote users get their captured photo, falling back to colored initials.
+// Border + glow + status text use the participant's color so a glance ties
 // each tile to that person's drawings.
-function ParticipantTile({ name, color, status, isLocal, videoEl }) {
+function ParticipantTile({ name, color, status, isLocal, avatar, videoEl }) {
   return (
     <div
       className={`participant-tile${isLocal ? ' is-local' : ''}`}
@@ -148,6 +147,8 @@ function ParticipantTile({ name, color, status, isLocal, videoEl }) {
       <div className="tile-camera">
         {isLocal ? (
           <video ref={videoEl} playsInline muted autoPlay />
+        ) : avatar ? (
+          <img className="tile-photo" src={avatar} alt="" />
         ) : (
           <div
             className="tile-placeholder"
@@ -177,7 +178,7 @@ function tileInitials(name) {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
 }
 
-export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave }) {
+export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '', onLeave }) {
   const stageRef = useRef(null)
   const videoRef = useRef(null)
   const tileVideoRef = useRef(null)
@@ -190,6 +191,7 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
     id: makeUserId(),
     name: displayName || 'Guest',
     color: LOCAL_USER_COLORS[Math.floor(Math.random() * LOCAL_USER_COLORS.length)],
+    avatar: avatar || '',
     isLocal: true,
   }))
 
@@ -267,6 +269,12 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
   // Server-assigned color (single source of truth for "my color"). The
   // initial localUser.color is only used until the server replies.
   const userColorRef = useRef(localUser.color)
+  // Cache of decoded avatar HTMLImageElement keyed by user id. Decoding is
+  // async — we kick it off when the participant list updates and read it
+  // synchronously from the cursor render path.
+  const avatarImgRef = useRef(new Map())
+  // Decoded image of the LOCAL user's avatar (or null until ready).
+  const myAvatarImgRef = useRef(null)
 
   const [audioOn, setAudioOn] = useState(false)
   // Ref mirror so the (stable) socket handlers can read current value
@@ -480,6 +488,7 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
           x, y, pinching,
           color: peer?.color || '#ffffff',
           name: peer?.name || '',
+          avatarImg: avatarImgRef.current.get(userId) || null,
         })
       },
       onRemoteStroke: (meta) => {
@@ -550,12 +559,39 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
     },
   })
 
-  // Keep peersRef in sync with the latest participants list.
+  // Keep peersRef in sync with the latest participants list. Also pre-decode
+  // any new avatar dataURLs into HTMLImageElements so the cursor render path
+  // can blit them directly without paying the decode cost on a hot frame.
   useEffect(() => {
     const m = new Map()
     for (const p of room.participants) m.set(p.id, p)
     peersRef.current = m
-  }, [room.participants])
+    const cache = avatarImgRef.current
+    for (const p of room.participants) {
+      if (!p.avatar) { cache.delete(p.id); continue }
+      const existing = cache.get(p.id)
+      if (existing && existing.src === p.avatar) continue
+      const img = new Image()
+      img.src = p.avatar
+      cache.set(p.id, img)
+      // The render loop reads img.complete; no listener needed.
+    }
+    // Drop cache entries for departed participants.
+    for (const id of cache.keys()) {
+      if (!m.has(id)) cache.delete(id)
+    }
+    // Self avatar (only this client's local cursor uses it).
+    const meSelf = room.me || localUser
+    if (meSelf?.avatar) {
+      if (!myAvatarImgRef.current || myAvatarImgRef.current.src !== meSelf.avatar) {
+        const img = new Image()
+        img.src = meSelf.avatar
+        myAvatarImgRef.current = img
+      }
+    } else {
+      myAvatarImgRef.current = null
+    }
+  }, [room.participants, room.me, localUser])
 
   // Keep userColorRef synced with the server-assigned color.
   useEffect(() => {
@@ -708,7 +744,11 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
       // it was so the in-progress stroke doesn't visually flicker.
       if (ps.missingFrames > SIMPLE_HAND_MISSING_GRACE_FRAMES) {
         setCursor(field, field.cursor.x, field.cursor.y, {
-          visible: false, pinching: false, color: userColorRef.current,
+          visible: false,
+          pinching: false,
+          color: userColorRef.current,
+          avatarImg: myAvatarImgRef.current,
+          name: localUser.name,
         })
         clearEditingCursor(field)
       }
@@ -867,7 +907,12 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
     // Always-visible cursor; hide editing cursor (edit mode disabled).
     clearEditingCursor(field)
     setCursor(field, c.x, c.y, {
-      visible: true, pinching: isPinching, nearPinch, color: userColorRef.current,
+      visible: true,
+      pinching: isPinching,
+      nearPinch,
+      color: userColorRef.current,
+      avatarImg: myAvatarImgRef.current,
+      name: localUser.name,
     })
 
     // Multiplayer: broadcast cursor at ~30 Hz throttle. Normalized 0..1 so
@@ -1089,6 +1134,18 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
   const isHost = !room.hostId || room.hostId === localUser.id
   // Effective local user (server-assigned color overrides client placeholder).
   const me = room.me || localUser
+  // Single source of truth for the top bar. The server's participants list
+  // already contains everyone (incl. self), but if the socket hasn't connected
+  // yet we still want to render *something* — so fall back to a synthetic
+  // [me]. Always self-first for stable layout.
+  const participantList = useMemo(() => {
+    const list = room.participants && room.participants.length
+      ? room.participants
+      : [me]
+    const self = list.find((p) => p.id === localUser.id)
+    const others = list.filter((p) => p.id !== localUser.id)
+    return self ? [self, ...others] : [me, ...others]
+  }, [room.participants, me, localUser.id])
   const remoteStrokesCount = useMemo(
     () => Array.from(strokeMeta.current.values()).filter(m => !m.isLocal).length,
     [debug.visualStrokes, debug.visualDots],
@@ -1130,21 +1187,20 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
         </div>
 
         <div className="tiles-scroll">
-          <ParticipantTile
-            name={me.name}
-            color={me.color}
-            status={localStatus}
-            isLocal
-            videoEl={tileVideoRef}
-          />
-          {room.participants.map((p) => (
-            <ParticipantTile
-              key={p.id}
-              name={p.name}
-              color={p.color}
-              status="listening"
-            />
-          ))}
+          {participantList.map((p) => {
+            const isLocal = p.id === localUser.id
+            return (
+              <ParticipantTile
+                key={p.id}
+                name={p.name}
+                color={p.color}
+                avatar={p.avatar}
+                status={isLocal ? localStatus : 'listening'}
+                isLocal={isLocal}
+                videoEl={isLocal ? tileVideoRef : undefined}
+              />
+            )
+          })}
         </div>
 
         <div className="hint-chip">
@@ -1291,10 +1347,11 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
         <div className="row"><span>local user id</span><b>{localUser.id}</b></div>
         <div className="row"><span>host id</span><b>{room.hostId || '—'}</b></div>
         <div className="row"><span>am I host</span><b>{isHost ? 'yes' : 'no'}</b></div>
-        <div className="row"><span>participants</span><b>{room.participants.length + 1}</b></div>
+        <div className="row"><span>participants</span><b>{participantList.length}</b></div>
         <div className="row"><span>participant ids</span><b style={{ fontSize: '0.7rem' }}>
-          {[localUser, ...room.participants].map(p => p.name).join(', ')}
+          {participantList.map(p => `${p.name}(${p.id.slice(-4)})`).join(', ')}
         </b></div>
+        <div className="row"><span>my socket id</span><b style={{ fontSize: '0.7rem' }}>{me.socketId || '—'}</b></div>
         <div className="row"><span>remote cursors</span><b>{debug.remoteCursors || 0}</b></div>
         <div className="row"><span>shared drawings</span><b>{strokeMeta.current.size}</b></div>
         <div className="row"><span>remote drawings</span><b>{remoteStrokesCount}</b></div>

@@ -272,6 +272,62 @@ input:focus {
   justify-content: flex-end;
 }
 
+.name-entry-actions.photo-actions {
+  flex-wrap: wrap;
+}
+
+/* Photo capture step */
+.photo-stage {
+  margin-top: 1.1rem;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  max-width: 200px;
+  margin-left: auto;
+  margin-right: auto;
+  border-radius: 50%;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.04);
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 24px -6px var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.photo-preview {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.photo-preview.live {
+  transform: scaleX(-1); /* selfie mirror — captured snap is already mirrored */
+}
+
+.photo-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(126, 226, 255, 0.18), rgba(201, 123, 255, 0.18));
+  font: 700 2.4rem system-ui, sans-serif;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+}
+
+.photo-error {
+  margin-top: 0.7rem;
+  padding: 0.5rem 0.7rem;
+  border-radius: 8px;
+  background: rgba(255, 109, 142, 0.1);
+  border: 1px solid rgba(255, 109, 142, 0.4);
+  color: #ff6d8e;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
 /* ---------- Calibration ---------- */
 .calibration {
   position: absolute;
@@ -702,6 +758,15 @@ input:focus {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.canvas-page .participant-tile .tile-photo {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 .canvas-page .participant-tile .tile-initials {

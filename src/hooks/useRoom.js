@@ -1,6 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { io } from 'socket.io-client'
 
+// First occurrence wins. Server may send a stale + fresh entry briefly
+// during reconnect; this keeps the bar from flashing duplicates.
+function dedupeById(list) {
+  const seen = new Set()
+  const out = []
+  for (const u of list || []) {
+    if (!u || !u.id || seen.has(u.id)) continue
+    seen.add(u.id)
+    out.push(u)
+  }
+  return out
+}
+
 // Socket.IO client wrapper.
 // - Connects to the same origin the page is served from, so a roommate on
 //   another laptop just opens http://192.168.x.x:5173 and joins automatically.
@@ -47,9 +60,14 @@ export function useRoom({ roomCode, user, enabled, handlers }) {
       socketRef.current?.emit('participants:request')
     }, 3000)
 
-    socket.on('room:state', ({ peers, strokes, hostId: hid, audioPlaying: ap, audioStartedAt }) => {
-      // Initial join snapshot. peers does NOT include self.
-      setParticipants(peers || [])
+    socket.on('room:state', ({ you, peers, strokes, hostId: hid, audioPlaying: ap, audioStartedAt }) => {
+      // Initial join snapshot. Build the FULL list (self + peers) so the
+      // top bar always has at least our own entry to render against.
+      const full = []
+      if (you) full.push(you)
+      if (Array.isArray(peers)) full.push(...peers)
+      setParticipants(dedupeById(full))
+      if (you) setMe(you)
       if (hid) setHostId(hid)
       setAudioPlaying(!!ap)
       if (Array.isArray(strokes)) {
@@ -59,20 +77,21 @@ export function useRoom({ roomCode, user, enabled, handlers }) {
     })
 
     // Full-list participant update — fires on every membership change AND
-    // on every poll. Server includes the current user too; we filter
-    // ourselves out before storing (the local user renders separately).
-    socket.on('room:participants', ({ participants: list, hostId: hid }) => {
+    // on every poll. Server includes EVERY user (self + others); we keep
+    // the full list as our source of truth and dedupe by user id.
+    const handleParticipants = ({ participants: list, hostId: hid }) => {
       if (Array.isArray(list)) {
-        console.log('[useRoom] room:participants ←', list.length,
+        console.log('[useRoom] participants ←', list.length,
           'users:', list.map(p => `${p.name}(${p.id.slice(-6)})`).join(', '))
-        const peers = list.filter((p) => p.id !== user.id)
-        setParticipants(peers)
+        setParticipants(dedupeById(list))
         // Update self from the list too (server may have changed our color).
         const self = list.find((p) => p.id === user.id)
         if (self) setMe(self)
       }
       if (hid) setHostId(hid)
-    })
+    }
+    socket.on('room:participants', handleParticipants)
+    socket.on('participants:update', handleParticipants)
 
     socket.on('host:changed', ({ hostId: hid }) => setHostId(hid))
     socket.on('audio:start', (payload) => {
@@ -91,9 +110,9 @@ export function useRoom({ roomCode, user, enabled, handlers }) {
       })
     })
 
-    socket.on('participant:left', ({ userId }) => {
-      setParticipants((prev) => prev.filter((p) => p.id !== userId))
-      handlersRef.current.onParticipantLeft?.(userId)
+    socket.on('participant:left', ({ userId: leftId }) => {
+      setParticipants((prev) => prev.filter((p) => p.id !== leftId))
+      handlersRef.current.onParticipantLeft?.(leftId)
     })
 
     socket.on('cursor:update', (data) => {

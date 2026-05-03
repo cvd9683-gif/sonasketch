@@ -15,6 +15,7 @@ export default function App() {
   const [stage, setStage] = useState('landing')
   const [roomCode, setRoomCode] = useState('')
   const [displayName, setDisplayName] = useState('')
+  const [avatar, setAvatar] = useState('') // dataURL or ''
   const [intent, setIntent] = useState('create') // 'create' | 'join'
   const [pendingJoinCode, setPendingJoinCode] = useState('')
 
@@ -30,9 +31,10 @@ export default function App() {
     setStage('name')
   }, [])
 
-  const handleNameSubmit = useCallback((name, joinCode) => {
+  const handleNameSubmit = useCallback((name, joinCode, avatarDataUrl) => {
     const trimmed = (name || '').trim().slice(0, 24)
     setDisplayName(trimmed.length ? trimmed : 'Guest')
+    setAvatar(avatarDataUrl || '')
     if (intent === 'create') {
       setRoomCode(makeRoomCode())
     } else {
@@ -58,6 +60,7 @@ export default function App() {
           intent={intent}
           initialJoinCode={pendingJoinCode}
           initialName={displayName}
+          initialAvatar={avatar}
           onSubmit={handleNameSubmit}
           onBack={handleBackFromName}
         />
@@ -69,6 +72,7 @@ export default function App() {
         <CanvasPage
           roomCode={roomCode}
           displayName={displayName}
+          avatar={avatar}
           onLeave={handleLeave}
         />
       )}

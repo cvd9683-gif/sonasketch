@@ -49,12 +49,13 @@ export function attachSonaSocket(httpServer) {
   }
   function broadcastParticipants(roomCode, room) {
     const list = participantsList(room)
-    console.log('[sonasocket] broadcast room:participants →', roomCode, '·',
+    console.log('[sonasocket] broadcast participants →', roomCode, '·',
       list.length, 'users:', list.map(u => `${u.name}(${u.id})`).join(', '))
-    io.to(roomCode).emit('room:participants', {
-      participants: list,
-      hostId: room.hostId,
-    })
+    const payload = { participants: list, hostId: room.hostId }
+    // Emit both the legacy event name and the spec name so any client
+    // listening on either will pick it up.
+    io.to(roomCode).emit('room:participants', payload)
+    io.to(roomCode).emit('participants:update', payload)
   }
 
   // Server-side color pool. Each room independently picks the first unused
@@ -91,7 +92,12 @@ export function attachSonaSocket(httpServer) {
       // SERVER assigns the color so two clients can't accidentally share
       // one. Client-side color is just a placeholder until this lands.
       const assignedColor = pickColor(room)
-      const finalUser = { ...user, color: assignedColor }
+      // De-dupe by user.id: if the same userId is rejoining (reconnect),
+      // drop any stale entries first so the room view doesn't show ghosts.
+      for (const [sid, u] of room.users) {
+        if (u.id === user.id && sid !== socket.id) room.users.delete(sid)
+      }
+      const finalUser = { ...user, color: assignedColor, socketId: socket.id }
       room.users.set(socket.id, finalUser)
       console.log('[sonasocket] join', roomCode, '·', finalUser.name,
         '(' + finalUser.id + ') color=' + assignedColor)

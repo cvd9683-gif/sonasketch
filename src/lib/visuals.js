@@ -83,13 +83,15 @@ export function resizeField(field, width, height) {
   }
 }
 
-export function setCursor(field, x, y, { visible = true, pinching = false, nearPinch = false, color } = {}) {
+export function setCursor(field, x, y, { visible = true, pinching = false, nearPinch = false, color, avatarImg, name } = {}) {
   field.cursor.x = x
   field.cursor.y = y
   field.cursor.visible = visible
   field.cursor.pinching = pinching
   field.cursor.nearPinch = nearPinch
   if (color) field.cursor.color = color
+  if (avatarImg !== undefined) field.cursor.avatarImg = avatarImg
+  if (name !== undefined) field.cursor.name = name
 }
 
 // Editing cursor (second hand, never produces sound).
@@ -298,7 +300,7 @@ export function clearStrokes(field) {
 // Multiplayer: write/clear a remote participant's cursor.
 // position is normalized 0..1; rendered in the participant's color so each
 // person's cursor reads as theirs.
-export function setRemoteCursor(field, userId, { x, y, pinching, color, name, visible = true }) {
+export function setRemoteCursor(field, userId, { x, y, pinching, color, name, avatarImg, visible = true }) {
   if (!visible) {
     field.remoteCursors.delete(userId)
     return
@@ -308,7 +310,8 @@ export function setRemoteCursor(field, userId, { x, y, pinching, color, name, vi
     existing.nx = x; existing.ny = y
     existing.pinching = !!pinching
     if (color) existing.color = color
-    if (name) existing.name = name
+    if (name !== undefined) existing.name = name
+    if (avatarImg !== undefined) existing.avatarImg = avatarImg
     existing.lastSeen = performance.now()
   } else {
     field.remoteCursors.set(userId, {
@@ -316,6 +319,7 @@ export function setRemoteCursor(field, userId, { x, y, pinching, color, name, vi
       pinching: !!pinching,
       color: color || '#ffffff',
       name: name || '',
+      avatarImg: avatarImg || null,
       lastSeen: performance.now(),
     })
   }
@@ -465,42 +469,62 @@ function getInitials(name) {
 function drawRemoteCursor(ctx, rc, width, height) {
   const x = rc.nx * width
   const y = rc.ny * height
-  const avatarR = rc.pinching ? 14 : 18  // disc radius
-  const ringR = avatarR + 4               // outer color ring
+  drawAvatarCursor(ctx, x, y, {
+    color: rc.color,
+    pinching: rc.pinching,
+    avatarImg: rc.avatarImg,
+    name: rc.name,
+  })
+}
+
+// Shared avatar-cursor renderer: outer color glow + ring + circle-clipped
+// photo if available, else colored initials disc. Used for both local and
+// remote cursors so identity reads consistently across the room.
+function drawAvatarCursor(ctx, x, y, { color, pinching, avatarImg, name }) {
+  const avatarR = pinching ? 14 : 18
+  const ringR = avatarR + 4
 
   // Soft outer glow in user's color
   const glow = ctx.createRadialGradient(x, y, 0, x, y, ringR * 2.2)
-  glow.addColorStop(0, hexToRgba(rc.color, 0))
-  glow.addColorStop(0.4, hexToRgba(rc.color, rc.pinching ? 0.35 : 0.22))
-  glow.addColorStop(1, hexToRgba(rc.color, 0))
+  glow.addColorStop(0, hexToRgba(color, 0))
+  glow.addColorStop(0.4, hexToRgba(color, pinching ? 0.4 : 0.25))
+  glow.addColorStop(1, hexToRgba(color, 0))
   ctx.fillStyle = glow
   ctx.beginPath()
   ctx.arc(x, y, ringR * 2.2, 0, Math.PI * 2)
   ctx.fill()
 
-  // Color ring
-  ctx.strokeStyle = rc.color
-  ctx.lineWidth = rc.pinching ? 3 : 2
+  if (avatarImg && avatarImg.complete && avatarImg.naturalWidth) {
+    // Photo: circular clip, then drawImage covering the disc.
+    ctx.save()
+    ctx.beginPath()
+    ctx.arc(x, y, avatarR, 0, Math.PI * 2)
+    ctx.clip()
+    const d = avatarR * 2
+    ctx.drawImage(avatarImg, x - avatarR, y - avatarR, d, d)
+    ctx.restore()
+  } else {
+    // Initials fallback: dark disc + colored letters.
+    ctx.fillStyle = '#11141d'
+    ctx.beginPath()
+    ctx.arc(x, y, avatarR, 0, Math.PI * 2)
+    ctx.fill()
+    const initials = getInitials(name)
+    ctx.fillStyle = color
+    ctx.font = `bold ${avatarR * 0.95}px system-ui, sans-serif`
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(initials, x, y + 1)
+    ctx.textAlign = 'start'
+    ctx.textBaseline = 'alphabetic'
+  }
+
+  // Color ring on top
+  ctx.strokeStyle = color
+  ctx.lineWidth = pinching ? 3 : 2
   ctx.beginPath()
   ctx.arc(x, y, ringR, 0, Math.PI * 2)
   ctx.stroke()
-
-  // Avatar disc (filled with darker shade of user color)
-  ctx.fillStyle = '#11141d'
-  ctx.beginPath()
-  ctx.arc(x, y, avatarR, 0, Math.PI * 2)
-  ctx.fill()
-
-  // Initials
-  const initials = getInitials(rc.name)
-  ctx.fillStyle = rc.color
-  ctx.font = `bold ${avatarR * 0.95}px system-ui, sans-serif`
-  ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
-  ctx.fillText(initials, x, y + 1)
-  // Reset text alignment for any other consumers.
-  ctx.textAlign = 'start'
-  ctx.textBaseline = 'alphabetic'
 }
 
 // Permanent dot: glowing orb with outer ring. Distinct from strokes' lines.
@@ -717,38 +741,17 @@ function drawEditingCursor(ctx, ec) {
 }
 
 function drawCursor(ctx, cursor) {
-  // Three states: pinching (small bright), nearPinch (medium, ramping up),
-  // idle (large soft halo). nearPinch tells the user "I see you intend to
-  // pinch" before we commit to drawing.
-  const pinching = !!cursor.pinching
-  const nearPinch = !!cursor.nearPinch && !pinching
-  const r = pinching ? 14 : nearPinch ? 19 : 26
-  const haloAlpha = pinching ? 0.6 : nearPinch ? 0.5 : 0.4
-  const coreR = pinching ? 5 : nearPinch ? 4.2 : 3.5
-  const color = cursor.color || '#7ee2ff'
-  const grad = ctx.createRadialGradient(cursor.x, cursor.y, 0, cursor.x, cursor.y, r * 1.6)
-  grad.addColorStop(0, 'rgba(255, 255, 255, 1)')
-  grad.addColorStop(0.5, hexToRgba(color, haloAlpha))
-  grad.addColorStop(1, hexToRgba(color, 0))
-  ctx.fillStyle = grad
-  ctx.beginPath()
-  ctx.arc(cursor.x, cursor.y, r * 1.6, 0, Math.PI * 2)
-  ctx.fill()
-
-  // hard core dot
-  ctx.fillStyle = 'rgba(255, 255, 255, 1)'
-  ctx.beginPath()
-  ctx.arc(cursor.x, cursor.y, coreR, 0, Math.PI * 2)
-  ctx.fill()
-
-  // nearPinch: thin outline ring as a "lock-in is ready" cue.
-  if (nearPinch) {
-    ctx.strokeStyle = hexToRgba(color, 0.7)
-    ctx.lineWidth = 1.5
-    ctx.beginPath()
-    ctx.arc(cursor.x, cursor.y, r + 4, 0, Math.PI * 2)
-    ctx.stroke()
-  }
+  // Avatar cursor: photo (or colored initials) inside a color ring + glow.
+  // Pinching shrinks the disc slightly so the user sees a clear state change.
+  // nearPinch is folded into pinching for visual purposes — both render the
+  // smaller size since the user is committing to a draw action.
+  const pinching = !!cursor.pinching || !!cursor.nearPinch
+  drawAvatarCursor(ctx, cursor.x, cursor.y, {
+    color: cursor.color || '#7ee2ff',
+    pinching,
+    avatarImg: cursor.avatarImg,
+    name: cursor.name,
+  })
 }
 
 function hexToRgba(hex, alpha) {
