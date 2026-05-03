@@ -8,7 +8,10 @@ import { io } from 'socket.io-client'
 //   don't need to gate.
 export function useRoom({ roomCode, user, enabled, handlers }) {
   const [participants, setParticipants] = useState([])
+  const [me, setMe] = useState(user || null)  // server-assigned user object
   const [connected, setConnected] = useState(false)
+  const [hostId, setHostId] = useState(null)
+  const [audioPlaying, setAudioPlaying] = useState(false)
   const socketRef = useRef(null)
   const handlersRef = useRef(handlers || {})
 
@@ -26,14 +29,59 @@ export function useRoom({ roomCode, user, enabled, handlers }) {
     socket.on('connect', () => {
       setConnected(true)
       socket.emit('room:join', { roomCode, user })
+      // Backup poll: if the broadcast ever drops, this will refresh the
+      // participant list anyway. Cheap.
+      socket.emit('participants:request')
     })
     socket.on('disconnect', () => setConnected(false))
 
-    socket.on('room:state', ({ peers, strokes }) => {
+    // Server-assigned identity (color may be different from what we sent).
+    socket.on('user:assigned', ({ user: u }) => {
+      console.log('[useRoom] user:assigned →', u)
+      setMe(u)
+    })
+
+    // Periodic backup poll — once every 3s. Tiny payload; bulletproof
+    // against any missed broadcast event in either direction.
+    const pollId = setInterval(() => {
+      socketRef.current?.emit('participants:request')
+    }, 3000)
+
+    socket.on('room:state', ({ peers, strokes, hostId: hid, audioPlaying: ap, audioStartedAt }) => {
+      // Initial join snapshot. peers does NOT include self.
       setParticipants(peers || [])
+      if (hid) setHostId(hid)
+      setAudioPlaying(!!ap)
       if (Array.isArray(strokes)) {
         for (const s of strokes) handlersRef.current.onRemoteStroke?.(s)
       }
+      if (ap) handlersRef.current.onAudioStart?.({ fromHost: false, audioStartedAt, replay: true })
+    })
+
+    // Full-list participant update — fires on every membership change AND
+    // on every poll. Server includes the current user too; we filter
+    // ourselves out before storing (the local user renders separately).
+    socket.on('room:participants', ({ participants: list, hostId: hid }) => {
+      if (Array.isArray(list)) {
+        console.log('[useRoom] room:participants ←', list.length,
+          'users:', list.map(p => `${p.name}(${p.id.slice(-6)})`).join(', '))
+        const peers = list.filter((p) => p.id !== user.id)
+        setParticipants(peers)
+        // Update self from the list too (server may have changed our color).
+        const self = list.find((p) => p.id === user.id)
+        if (self) setMe(self)
+      }
+      if (hid) setHostId(hid)
+    })
+
+    socket.on('host:changed', ({ hostId: hid }) => setHostId(hid))
+    socket.on('audio:start', (payload) => {
+      setAudioPlaying(true)
+      handlersRef.current.onAudioStart?.(payload)
+    })
+    socket.on('audio:stop', (payload) => {
+      setAudioPlaying(false)
+      handlersRef.current.onAudioStop?.(payload)
     })
 
     socket.on('participant:joined', ({ user: u }) => {
@@ -65,6 +113,7 @@ export function useRoom({ roomCode, user, enabled, handlers }) {
     })
 
     return () => {
+      clearInterval(pollId)
       socket.removeAllListeners()
       socket.disconnect()
       socketRef.current = null
@@ -83,13 +132,24 @@ export function useRoom({ roomCode, user, enabled, handlers }) {
   const sendStrokesClear = useCallback(() => {
     socketRef.current?.emit('strokes:clear')
   }, [])
+  const sendAudioStart = useCallback(() => {
+    socketRef.current?.emit('audio:start')
+  }, [])
+  const sendAudioStop = useCallback(() => {
+    socketRef.current?.emit('audio:stop')
+  }, [])
 
   return {
     connected,
     participants,
+    me,
+    hostId,
+    audioPlaying,
     sendCursor,
     sendStrokeComplete,
     sendStrokeRemove,
     sendStrokesClear,
+    sendAudioStart,
+    sendAudioStop,
   }
 }

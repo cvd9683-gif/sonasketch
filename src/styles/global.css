@@ -595,6 +595,31 @@ input:focus {
   letter-spacing: 0.02em;
 }
 
+.canvas-page .audio-pending-banner {
+  position: fixed;
+  bottom: 1.4rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  padding: 0.7rem 1.1rem;
+  background: rgba(126, 226, 255, 0.18);
+  border: 1px solid rgba(126, 226, 255, 0.55);
+  color: #f5fbff;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  animation: audio-pending-pulse 1.6s ease-in-out infinite;
+}
+.canvas-page .audio-pending-banner:hover {
+  background: rgba(126, 226, 255, 0.28);
+}
+@keyframes audio-pending-pulse {
+  0%, 100% { box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45), 0 0 0 0 rgba(126, 226, 255, 0.4); }
+  50%      { box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45), 0 0 0 12px rgba(126, 226, 255, 0); }
+}
+
 .canvas-page .hint-chip {
   text-align: right;
 }
@@ -674,6 +699,15 @@ input:focus {
 .canvas-page .participant-tile .tile-placeholder {
   position: absolute;
   inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.canvas-page .participant-tile .tile-initials {
+  font: 700 1.1rem system-ui, sans-serif;
+  letter-spacing: 0.04em;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
 .canvas-page .participant-tile .tile-info {

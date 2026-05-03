@@ -200,17 +200,24 @@ export function useHandTracking({ videoRef, overlayRef, enabled, onResults, maxN
   return { status, error, info }
 }
 
+// Pinch thresholds duplicated here for the overlay annotation. Kept in sync
+// manually with PINCH_START_PX / PINCH_END_PX in Canvas.jsx — the overlay's
+// PINCHED/OPEN label is purely visual proof that detection is right.
+const OVERLAY_PINCH_START_PX = 45
+const OVERLAY_PINCH_END_PX = 70
+
 function drawOverlay(canvas, results) {
   if (!canvas) return
   const ctx = canvas.getContext('2d')
   const w = canvas.width
   const h = canvas.height
   ctx.clearRect(0, 0, w, h)
-  if (!results.multiHandLandmarks) return
+  if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return
 
   for (const landmarks of results.multiHandLandmarks) {
+    // Skeleton (dim, so the highlighted thumb/index pop)
     ctx.lineWidth = 2
-    ctx.strokeStyle = 'rgba(126, 226, 255, 0.85)'
+    ctx.strokeStyle = 'rgba(126, 226, 255, 0.55)'
     ctx.beginPath()
     for (const [a, b] of HAND_CONNECTIONS) {
       const pa = landmarks[a]
@@ -220,11 +227,69 @@ function drawOverlay(canvas, results) {
     }
     ctx.stroke()
 
-    ctx.fillStyle = 'rgba(201, 123, 255, 0.95)'
-    for (const lm of landmarks) {
+    // All other landmarks (small, dim)
+    ctx.fillStyle = 'rgba(201, 123, 255, 0.55)'
+    for (let i = 0; i < landmarks.length; i++) {
+      if (i === 4 || i === 8) continue
+      const lm = landmarks[i]
       ctx.beginPath()
-      ctx.arc(lm.x * w, lm.y * h, 3.5, 0, Math.PI * 2)
+      ctx.arc(lm.x * w, lm.y * h, 3, 0, Math.PI * 2)
       ctx.fill()
     }
+
+    // Thumb tip (4) — red. Index tip (8) — cyan. Line between them.
+    const thumb = landmarks[4]
+    const index = landmarks[8]
+    const tx = thumb.x * w, ty = thumb.y * h
+    const ix = index.x * w, iy = index.y * h
+    const distPx = Math.hypot(tx - ix, ty - iy)
+    const isPinched = distPx < OVERLAY_PINCH_START_PX
+    const isNear = !isPinched && distPx < OVERLAY_PINCH_END_PX
+    const lineColor = isPinched ? '#6dffb1' : (isNear ? '#ffd97e' : '#ff6d8e')
+
+    ctx.strokeStyle = lineColor
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    ctx.moveTo(tx, ty)
+    ctx.lineTo(ix, iy)
+    ctx.stroke()
+
+    // Thumb tip — red
+    ctx.fillStyle = '#ff6d8e'
+    ctx.beginPath()
+    ctx.arc(tx, ty, 7, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.strokeStyle = '#ffffff'
+    ctx.lineWidth = 1.5
+    ctx.stroke()
+
+    // Index tip — cyan
+    ctx.fillStyle = '#7ee2ff'
+    ctx.beginPath()
+    ctx.arc(ix, iy, 7, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.strokeStyle = '#ffffff'
+    ctx.lineWidth = 1.5
+    ctx.stroke()
+
+    // Distance label near the midpoint
+    const mx = (tx + ix) / 2
+    const my = (ty + iy) / 2
+    ctx.font = 'bold 14px ui-monospace, monospace'
+    const distText = `${Math.round(distPx)}px`
+    const tw = ctx.measureText(distText).width
+    ctx.fillStyle = 'rgba(0,0,0,0.7)'
+    ctx.fillRect(mx - tw / 2 - 4, my - 18, tw + 8, 16)
+    ctx.fillStyle = '#ffffff'
+    ctx.fillText(distText, mx - tw / 2, my - 6)
+
+    // Big PINCHED/OPEN/NEAR pill in the top-left of the overlay
+    const label = isPinched ? 'PINCHED' : (isNear ? 'NEAR' : 'OPEN')
+    ctx.font = 'bold 16px system-ui, sans-serif'
+    const lw = ctx.measureText(label).width
+    ctx.fillStyle = lineColor
+    ctx.fillRect(8, 8, lw + 16, 22)
+    ctx.fillStyle = '#0b0d14'
+    ctx.fillText(label, 16, 24)
   }
 }

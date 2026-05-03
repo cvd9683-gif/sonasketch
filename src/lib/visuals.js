@@ -53,6 +53,9 @@ export function createField({ width, height }) {
     // Stored in normalized 0..1 so we don't have to rescale on resize.
     remoteCursors: new Map(),
     nextId: 1,
+    // Prefix every locally-generated id with this so the same numeric counter
+    // on two clients can't collide. Set by Canvas.jsx after construction.
+    idPrefix: 'local',
   }
 }
 
@@ -80,11 +83,12 @@ export function resizeField(field, width, height) {
   }
 }
 
-export function setCursor(field, x, y, { visible = true, pinching = false, color } = {}) {
+export function setCursor(field, x, y, { visible = true, pinching = false, nearPinch = false, color } = {}) {
   field.cursor.x = x
   field.cursor.y = y
   field.cursor.visible = visible
   field.cursor.pinching = pinching
+  field.cursor.nearPinch = nearPinch
   if (color) field.cursor.color = color
 }
 
@@ -212,7 +216,7 @@ export function endStroke(field) {
   // Visual cache is decimated for cheap redraw.
   const visualPoints = decimatePoints(smoothed, MAX_VISUAL_POINTS_PER_STROKE)
 
-  const id = String(field.nextId++)
+  const id = `${field.idPrefix}-s${field.nextId++}`
   field.strokes.set(id, {
     points: visualPoints,
     color: active.color,
@@ -244,7 +248,7 @@ export function pulseStrokeAt(field, strokeId, nx, ny) {
  */
 export function addDot(field, x, y, color = DEFAULT_COLOR) {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null
-  const id = `d${field.nextId++}`
+  const id = `${field.idPrefix}-d${field.nextId++}`
   field.dots.set(id, {
     x, y, color,
     scale: 1.5,
@@ -446,44 +450,57 @@ export function render(ctx, field, { loopPhase = 0 } = {}) {
   ctx.globalCompositeOperation = 'source-over'
 }
 
+// Remote cursors render as a small circular avatar with the user's color
+// glowing behind. The avatar shows initials (1-2 chars from the name) on
+// a colored disc — no floating name pill. Easier to scan when multiple
+// peers are drawing at once. Photo support could replace the initials disc
+// later (rc.avatar would carry an HTMLImageElement or dataURL).
+function getInitials(name) {
+  const parts = (name || '').trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return '?'
+  if (parts.length === 1) return parts[0][0].toUpperCase()
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+}
+
 function drawRemoteCursor(ctx, rc, width, height) {
   const x = rc.nx * width
   const y = rc.ny * height
-  const r = rc.pinching ? 12 : 22
-  const grad = ctx.createRadialGradient(x, y, 0, x, y, r * 1.6)
-  grad.addColorStop(0, hexToRgba('#ffffff', 0.85))
-  grad.addColorStop(0.5, hexToRgba(rc.color, rc.pinching ? 0.55 : 0.35))
-  grad.addColorStop(1, hexToRgba(rc.color, 0))
-  ctx.fillStyle = grad
+  const avatarR = rc.pinching ? 14 : 18  // disc radius
+  const ringR = avatarR + 4               // outer color ring
+
+  // Soft outer glow in user's color
+  const glow = ctx.createRadialGradient(x, y, 0, x, y, ringR * 2.2)
+  glow.addColorStop(0, hexToRgba(rc.color, 0))
+  glow.addColorStop(0.4, hexToRgba(rc.color, rc.pinching ? 0.35 : 0.22))
+  glow.addColorStop(1, hexToRgba(rc.color, 0))
+  ctx.fillStyle = glow
   ctx.beginPath()
-  ctx.arc(x, y, r * 1.6, 0, Math.PI * 2)
+  ctx.arc(x, y, ringR * 2.2, 0, Math.PI * 2)
   ctx.fill()
 
-  // Outline so two cursors of similar color stay distinguishable from local.
-  ctx.strokeStyle = hexToRgba(rc.color, 0.9)
-  ctx.lineWidth = 2
+  // Color ring
+  ctx.strokeStyle = rc.color
+  ctx.lineWidth = rc.pinching ? 3 : 2
   ctx.beginPath()
-  ctx.arc(x, y, r * 0.6, 0, Math.PI * 2)
+  ctx.arc(x, y, ringR, 0, Math.PI * 2)
   ctx.stroke()
 
-  if (rc.name) {
-    ctx.font = '600 11px system-ui, sans-serif'
-    const label = rc.name
-    const metrics = ctx.measureText(label)
-    const padX = 6
-    const padY = 3
-    const boxW = metrics.width + padX * 2
-    const boxH = 16
-    const bx = x + r + 6
-    const by = y - boxH / 2
-    ctx.fillStyle = hexToRgba(rc.color, 0.95)
-    ctx.beginPath()
-    if (ctx.roundRect) ctx.roundRect(bx, by, boxW, boxH, 4)
-    else ctx.rect(bx, by, boxW, boxH)
-    ctx.fill()
-    ctx.fillStyle = '#0b0d14'
-    ctx.fillText(label, bx + padX, by + boxH - padY - 1)
-  }
+  // Avatar disc (filled with darker shade of user color)
+  ctx.fillStyle = '#11141d'
+  ctx.beginPath()
+  ctx.arc(x, y, avatarR, 0, Math.PI * 2)
+  ctx.fill()
+
+  // Initials
+  const initials = getInitials(rc.name)
+  ctx.fillStyle = rc.color
+  ctx.font = `bold ${avatarR * 0.95}px system-ui, sans-serif`
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(initials, x, y + 1)
+  // Reset text alignment for any other consumers.
+  ctx.textAlign = 'start'
+  ctx.textBaseline = 'alphabetic'
 }
 
 // Permanent dot: glowing orb with outer ring. Distinct from strokes' lines.
@@ -700,12 +717,18 @@ function drawEditingCursor(ctx, ec) {
 }
 
 function drawCursor(ctx, cursor) {
-  const r = cursor.pinching ? 14 : 26
+  // Three states: pinching (small bright), nearPinch (medium, ramping up),
+  // idle (large soft halo). nearPinch tells the user "I see you intend to
+  // pinch" before we commit to drawing.
+  const pinching = !!cursor.pinching
+  const nearPinch = !!cursor.nearPinch && !pinching
+  const r = pinching ? 14 : nearPinch ? 19 : 26
+  const haloAlpha = pinching ? 0.6 : nearPinch ? 0.5 : 0.4
+  const coreR = pinching ? 5 : nearPinch ? 4.2 : 3.5
   const color = cursor.color || '#7ee2ff'
   const grad = ctx.createRadialGradient(cursor.x, cursor.y, 0, cursor.x, cursor.y, r * 1.6)
-  // Pinching = brighter, denser glow in the user's color. Idle = softer halo.
   grad.addColorStop(0, 'rgba(255, 255, 255, 1)')
-  grad.addColorStop(0.5, hexToRgba(color, cursor.pinching ? 0.6 : 0.4))
+  grad.addColorStop(0.5, hexToRgba(color, haloAlpha))
   grad.addColorStop(1, hexToRgba(color, 0))
   ctx.fillStyle = grad
   ctx.beginPath()
@@ -715,8 +738,17 @@ function drawCursor(ctx, cursor) {
   // hard core dot
   ctx.fillStyle = 'rgba(255, 255, 255, 1)'
   ctx.beginPath()
-  ctx.arc(cursor.x, cursor.y, cursor.pinching ? 5 : 3.5, 0, Math.PI * 2)
+  ctx.arc(cursor.x, cursor.y, coreR, 0, Math.PI * 2)
   ctx.fill()
+
+  // nearPinch: thin outline ring as a "lock-in is ready" cue.
+  if (nearPinch) {
+    ctx.strokeStyle = hexToRgba(color, 0.7)
+    ctx.lineWidth = 1.5
+    ctx.beginPath()
+    ctx.arc(cursor.x, cursor.y, r + 4, 0, Math.PI * 2)
+    ctx.stroke()
+  }
 }
 
 function hexToRgba(hex, alpha) {

@@ -152,7 +152,11 @@ function ParticipantTile({ name, color, status, isLocal, videoEl }) {
           <div
             className="tile-placeholder"
             style={{ background: `linear-gradient(135deg, ${color}55, ${color}10)` }}
-          />
+          >
+            <span className="tile-initials" style={{ color }}>
+              {tileInitials(name)}
+            </span>
+          </div>
         )}
       </div>
       <div className="tile-info">
@@ -164,6 +168,13 @@ function ParticipantTile({ name, color, status, isLocal, videoEl }) {
       </div>
     </div>
   )
+}
+
+function tileInitials(name) {
+  const parts = (name || '').trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return '?'
+  if (parts.length === 1) return parts[0][0].toUpperCase()
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
 }
 
 export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave }) {
@@ -253,8 +264,15 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
   // color + name without forcing the cursor handler to be recreated
   // (and re-subscribe the socket) every time someone joins.
   const peersRef = useRef(new Map())
+  // Server-assigned color (single source of truth for "my color"). The
+  // initial localUser.color is only used until the server replies.
+  const userColorRef = useRef(localUser.color)
 
   const [audioOn, setAudioOn] = useState(false)
+  // Ref mirror so the (stable) socket handlers can read current value
+  // without re-subscribing every time audioOn flips.
+  const audioOnRef = useRef(false)
+  useEffect(() => { audioOnRef.current = audioOn }, [audioOn])
   const [muted, setMuted] = useState(false)
   const [enabled, setEnabled] = useState(false)
   // 'create' (draw) | 'edit' (hover + pinch-to-delete). Single-hand throughout —
@@ -312,6 +330,9 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
       canvas.style.height = `${window.innerHeight}px`
       if (!fieldRef.current) {
         fieldRef.current = createField({ width: canvas.width, height: canvas.height })
+        // Globally unique stroke/dot ids: prefix with this user's id so two
+        // clients drawing simultaneously can't collide on numeric counters.
+        fieldRef.current.idPrefix = localUser.id
       } else {
         resizeField(fieldRef.current, canvas.width, canvas.height)
       }
@@ -320,6 +341,8 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
     window.addEventListener('resize', resize)
 
     let last = performance.now()
+    let frameCount = 0
+    let lastHeartbeat = last
     const loop = (now) => {
       const dt = Math.min(0.05, (now - last) / 1000)
       last = now
@@ -328,9 +351,18 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
         step(field, dt)
         render(ctx, field, { loopPhase: getLoopPhase() })
       }
+      frameCount++
+      if (now - lastHeartbeat >= 1000) {
+        const f = fieldRef.current
+        console.log('[render-loop]', frameCount, 'fps · field:',
+          f ? `strokes=${f.strokes.size} dots=${f.dots.size} active=${!!f.activeStroke}` : 'null')
+        frameCount = 0
+        lastHeartbeat = now
+      }
       rafRef.current = requestAnimationFrame(loop)
     }
     rafRef.current = requestAnimationFrame(loop)
+    console.log('[render-loop] mounted, canvas', canvas.width, 'x', canvas.height)
 
     return () => {
       cancelAnimationFrame(rafRef.current)
@@ -352,12 +384,37 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
     }
   }, [])
 
-  // C / E keyboard shortcuts for mode toggle. Ignore when typing in inputs.
+  // C / E mode toggle. Plus debug keys:
+  //   D = drop a test dot at center (proves render path is alive)
+  //   L = draw a test horizontal stroke at center
+  //   X = clear everything
   useEffect(() => {
     const onKey = (e) => {
       if (e.target?.matches?.('input, textarea')) return
       if (e.key === 'c' || e.key === 'C') setMode('create')
       else if (e.key === 'e' || e.key === 'E') setMode('edit')
+      else if (e.key === 'd' || e.key === 'D') {
+        const field = fieldRef.current
+        if (!field) return console.warn('[debug-D] no field')
+        const dot = addDotVisual(field, field.width / 2, field.height / 2, '#ffffff')
+        console.log('[debug-D] forced dot →', dot, 'dots.size=', field.dots.size)
+      }
+      else if (e.key === 'l' || e.key === 'L') {
+        const field = fieldRef.current
+        if (!field) return
+        beginStroke(field, '#ffffff')
+        const y = field.height / 2
+        for (let i = 0; i <= 20; i++) {
+          appendActivePoint(field, field.width * (0.2 + 0.6 * i / 20), y, 0)
+        }
+        const finished = endStroke(field)
+        console.log('[debug-L] forced stroke →', finished, 'strokes.size=', field.strokes.size)
+      }
+      else if (e.key === 'x' || e.key === 'X') {
+        const field = fieldRef.current
+        if (field) clearStrokes(field)
+        console.log('[debug-X] cleared')
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -428,8 +485,34 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
       onRemoteStroke: (meta) => {
         const field = fieldRef.current
         if (!field) return
+        // De-dupe: ignore if we already have it (server replays history on
+        // join, and re-broadcasts can land if another client retries).
+        if (strokeMeta.current.has(meta.id)) return
         addRemoteStroke(field, meta)
         strokeMeta.current.set(meta.id, { ...meta, isLocal: false })
+
+        // Audio-for-remote: each client schedules its own copy locally.
+        // Skip silently if local audio isn't unlocked yet — the user can
+        // start audio later and any further remote strokes will play.
+        if (!audioOnRef.current) return
+        try {
+          if (meta.type === 'dot') {
+            const p = meta.points?.[0]
+            if (p) addDotAudio(meta.id, p.x, p.y)
+          } else if (meta.type === 'stroke') {
+            // Reconstruct pixelPoints in this client's canvas size for the
+            // phrase analyzer (it uses absolute distances).
+            const pts = (meta.points || []).map((p) => ({
+              x: p.x * field.width, y: p.y * field.height,
+            }))
+            if (pts.length >= 2) {
+              const phrase = createPhraseFromStroke(pts, field.width, field.height, BPM)
+              if (phrase) playStrokePhrase(meta.id, phrase)
+            }
+          }
+        } catch (err) {
+          console.warn('[remote-audio] failed to schedule', meta.id, err)
+        }
       },
       onRemoteRemove: (id) => {
         const field = fieldRef.current
@@ -453,6 +536,17 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
         const field = fieldRef.current
         if (field) removeRemoteCursor(field, userId)
       },
+      onAudioStart: async () => {
+        // Host (or any peer) said "audio is on" — try to unlock locally.
+        // If the browser blocks (no user gesture yet), surface a banner.
+        if (audioOnRef.current) return
+        const ok = await tryStartLocalAudioRef.current?.()
+        if (!ok) setAudioPending(true)
+      },
+      onAudioStop: () => {
+        setMasterMuted(true)
+        setMuted(true)
+      },
     },
   })
 
@@ -462,6 +556,11 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
     for (const p of room.participants) m.set(p.id, p)
     peersRef.current = m
   }, [room.participants])
+
+  // Keep userColorRef synced with the server-assigned color.
+  useEffect(() => {
+    if (room.me?.color) userColorRef.current = room.me.color
+  }, [room.me?.color])
 
   // Hand the room senders to the FSM via a ref (so we don't reallocate
   // onResults on every reconnect).
@@ -476,6 +575,42 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
 
   // ---------- Hand tracking ----------
   // Single-hand mode. The first detected hand is the drawing hand.
+  // ===== SIMPLE BASELINE GESTURE PIPELINE =====
+  // Replaces the 4-state FSM with the smallest correct implementation:
+  //   pinch-down  → record start, prep buffer, show dot preview
+  //   still pinching, moved enough → start a stroke, append points
+  //   pinch-up    → finalize as stroke (if moved) or dot (if not)
+  // No confirmation frames, no hysteresis, no edit branch, no broadcasts.
+  // Once this is visibly working we can layer the smoothing/FSM back on.
+  // ===== PINCH DETECTION (pixel-distance in video coords) =====
+  // Replaces the normalized-ratio approach because that one was hiding the
+  // actual sense of "are the fingers close in the image".
+  // Distance is measured in VIDEO pixels (typically 640×480 from MediaPipe):
+  //   pinch begins when thumb→index distance is BELOW PINCH_START_PX
+  //   pinch ends   when distance is ABOVE PINCH_END_PX
+  // END > START gives hysteresis so the stroke survives small finger relaxation.
+  // Tuned for beginner comfort — fingers don't have to fully close to start,
+  // and a wide END window means relaxing slightly mid-stroke is fine.
+  const PINCH_START_PX = 55
+  const PINCH_END_PX = 85
+  const NEAR_PINCH_PX = 120  // visual cue only — not used for drawing decisions
+  const SIMPLE_PINCH_CONFIRM_FRAMES = 2
+  // Re-add release-frame tolerance for beginners — flickering pinch shouldn't
+  // tear a stroke. 4 frames ≈ 65 ms, fast enough to feel responsive.
+  const SIMPLE_RELEASE_CONFIRM_FRAMES = 4
+  const SIMPLE_MIN_POINT_PX = 8        // beginner-tuned (was 6)
+  const SIMPLE_STROKE_MIN_PX = 25
+  const SIMPLE_DEADZONE_PX = 5         // beginner-tuned (was 3)
+  const SIMPLE_CURSOR_LERP = 0.10      // beginner-tuned: heavier follow (was 0.14)
+  const SIMPLE_RELEASE_FREEZE_MS = 120
+  // Pinch-drop grace shortened to 8 since hysteresis already absorbs most
+  // flicker; 8 still survives a bad ~130 ms patch at 60 Hz.
+  const SIMPLE_PINCH_DROP_GRACE_FRAMES = 8
+  const SIMPLE_HAND_MISSING_GRACE_FRAMES = 10
+  // Throttle cursor broadcasts at ~30 Hz so two laptops on Wi-Fi don't
+  // saturate the channel with per-frame messages.
+  const SIMPLE_CURSOR_SEND_MS = 33
+
   const onResults = useCallback((results) => {
     const lms = results.multiHandLandmarks || []
     const field = fieldRef.current
@@ -484,24 +619,26 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
     const c = cursorState.current
     const now = performance.now()
 
-    // Finalize an in-progress draw. Used both on confirmed release and on
-    // forced-cancel after the hand has been missing too long.
+    // Finalize the in-progress draw — produces either a stroke or a dot
+    // based on whether enough movement occurred to "begin" a stroke.
     const finalizeDraw = () => {
       clearDotPreview(field)
-      if (ps.mode === 'stroke-preview' && ps.strokeBegun) {
+      if (ps.strokeBegun) {
         const finished = endStroke(field)
+        console.log('[draw] END (stroke) →', finished ? `id=${finished.id}` : 'null')
         if (finished) {
-          const normalizedPoints = finished.pixelPoints.map((p) => ({
-            x: p.x / finished.width,
-            y: p.y / finished.height,
-          }))
+          // Broadcast: every peer in the room replicates this stroke visually.
+          // Audio stays local — each client schedules its own copy.
           const meta = {
             id: finished.id,
             userId: localUser.id,
             userName: localUser.name,
-            userColor: localUser.color,
+            userColor: userColorRef.current,
             type: 'stroke',
-            points: normalizedPoints,
+            points: finished.pixelPoints.map((p) => ({
+              x: p.x / finished.width,
+              y: p.y / finished.height,
+            })),
             createdAt: Date.now(),
             soundState: 'active',
             isLocal: true,
@@ -524,15 +661,17 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
             }
           }
         }
-      } else if (ps.mode === 'dot-preview') {
+      } else {
         if (field.activeStroke) field.activeStroke = null
-        const dot = addDotVisual(field, ps.startX, ps.startY, localUser.color)
+        const dot = addDotVisual(field, ps.startX, ps.startY, userColorRef.current)
+        console.log('[draw] END (dot) →', dot ? `id=${dot.id}` : 'null',
+          '· at', Math.round(ps.startX), Math.round(ps.startY))
         if (dot) {
           const meta = {
             id: dot.id,
             userId: localUser.id,
             userName: localUser.name,
-            userColor: localUser.color,
+            userColor: userColorRef.current,
             type: 'dot',
             points: [{ x: dot.normX, y: dot.normY }],
             createdAt: Date.now(),
@@ -544,71 +683,85 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
           addDotAudio(dot.id, dot.normX, dot.normY)
         }
       }
-      ps.state = 'idle'
-      ps.pinchFrames = 0
-      ps.releaseFrames = 0
-      ps.mode = 'unknown'
       ps.points = []
       ps.maxMovement = 0
       ps.strokeBegun = false
-      releaseFreezeUntil.current = now + RELEASE_FREEZE_MS
+      // Freeze cursor briefly so the next-frame jitter can't drag the
+      // smoothed cursor away from where the user actually let go.
+      releaseFreezeUntil.current = now + SIMPLE_RELEASE_FREEZE_MS
     }
 
-    // ---------- Missing-hand handling ----------
+    // ---------- Missing-hand grace ----------
+    // MediaPipe drops a frame here and there — don't end the stroke on the
+    // first miss. Keep the in-progress draw alive until the hand has been
+    // gone for SIMPLE_HAND_MISSING_GRACE_FRAMES consecutive frames.
     if (lms.length === 0) {
-      ps.missingFrames++
-      // Tolerate brief dropouts so the FSM doesn't lose state from one bad
-      // frame. Once the budget is exhausted, treat it as a release.
-      if (ps.missingFrames > MAX_MISSING_HAND_FRAMES) {
-        if (ps.state === 'drawing' || ps.state === 'releaseCandidate') {
-          finalizeDraw()
-        } else if (ps.state === 'pinchCandidate') {
-          ps.state = 'idle'
-          ps.pinchFrames = 0
-        }
+      ps.missingFrames = (ps.missingFrames || 0) + 1
+      if (ps.wasPinching && ps.missingFrames > SIMPLE_HAND_MISSING_GRACE_FRAMES) {
+        console.log('[draw] hand missing for', ps.missingFrames, 'frames — forcing finalize')
+        ps.lastFinalizedReason = 'hand missing'
+        finalizeDraw()
+        ps.wasPinching = false
+        ps.missingFrames = 0
+      }
+      // Only hide the cursor once the grace expires; otherwise leave it where
+      // it was so the in-progress stroke doesn't visually flicker.
+      if (ps.missingFrames > SIMPLE_HAND_MISSING_GRACE_FRAMES) {
         setCursor(field, field.cursor.x, field.cursor.y, {
-          visible: false, pinching: false, color: localUser.color,
+          visible: false, pinching: false, color: userColorRef.current,
         })
         clearEditingCursor(field)
-        roomApiRef.current?.sendCursor?.({ visible: false })
-      }
-      const tNow = performance.now()
-      if (tNow - lastDebugAt.current > DEBUG_INTERVAL_MS) {
-        lastDebugAt.current = tNow
-        setDebug((d) => ({
-          ...d,
-          handDetected: false, pinching: false,
-          pinchDistance: 0, pinchDuration: 0,
-          mode: 'idle', movementPx: 0,
-          audioStatus: getAudioStatus(),
-          activeSounds: getActiveSoundCount(),
-          scheduledEvents: getScheduledEventCount(),
-        }))
       }
       return
     }
     ps.missingFrames = 0
 
     const lm = lms[0]
+    // ----- Pinch detection: pixel distance between thumb tip + index tip -----
+    // Landmarks are normalized 0..1 in video frame; multiply by video px so
+    // the threshold is intuitive ("fingers within ~45 px of each other").
+    const v = videoRef.current
+    const videoW = v?.videoWidth || 640
+    const videoH = v?.videoHeight || 480
+    const thumb = lm[4]   // THUMB_TIP
+    const index = lm[8]   // INDEX_TIP
+    const tx = thumb.x * videoW
+    const ty = thumb.y * videoH
+    const ix = index.x * videoW
+    const iy = index.y * videoH
+    const pinchPxRaw = Math.hypot(tx - ix, ty - iy)
+    // Light smoothing on the px distance.
+    ps.pinchPxSmooth = ps.pinchPxSmooth == null
+      ? pinchPxRaw
+      : ps.pinchPxSmooth * 0.7 + pinchPxRaw * 0.3
+    // HYSTERESIS — wider window once committed so light finger relaxation
+    // mid-stroke does not end the stroke.
+    const pinchHeld = !!ps.wasPinching
+    const pinchRawNow = pinchHeld
+      ? ps.pinchPxSmooth < PINCH_END_PX     // sticky: fingers must clearly separate
+      : ps.pinchPxSmooth < PINCH_START_PX   // strict: fingers must be close to begin
+    // Near-pinch: fingers approaching but not committed. Visual cue only.
+    const nearPinch = !pinchHeld
+      && !pinchRawNow
+      && ps.pinchPxSmooth < NEAR_PINCH_PX
+    // 2-frame onset confirmation only for the FIRST entry into a pinch.
+    // Once held, isPinching FOLLOWS the raw (hysteresis-thresholded) state
+    // so release fires the moment the smoothed distance crosses END_PX.
+    // The previous logic used `pinchHeld || ...` which made isPinching
+    // sticky-true forever — that's the "pinch never releases" bug.
+    if (pinchRawNow) ps.pinchFrames = (ps.pinchFrames || 0) + 1
+    else ps.pinchFrames = 0
+    const isPinching = pinchHeld
+      ? pinchRawNow
+      : ps.pinchFrames >= SIMPLE_PINCH_CONFIRM_FRAMES
 
-    // Smooth pinch ratio so single-frame outliers can't toggle state.
-    const raw = getPinchRatio(lm)
-    ps.pinchRatioSmooth =
-      ps.pinchRatioSmooth * (1 - PINCH_DISTANCE_SMOOTHING) +
-      raw * PINCH_DISTANCE_SMOOTHING
-
-    // Hysteresis: from idle/pinchCandidate, must dip BELOW start (stricter);
-    // from drawing/releaseCandidate, only triggers release when ABOVE end
-    // (more permissive). Prevents oscillation around a single threshold.
-    const inHeldStates = ps.state === 'drawing' || ps.state === 'releaseCandidate'
-    const pinchDetected = inHeldStates
-      ? ps.pinchRatioSmooth < PINCH_END_THRESHOLD
-      : ps.pinchRatioSmooth < PINCH_START_THRESHOLD
-
-    // Cursor (smoothed, with deadzone, frozen briefly post-release).
+    // Cursor: lerp toward target, clamp to canvas bounds, with deadzone +
+    // post-release freeze. The smoothed cursor (c.x/c.y) is what feeds the
+    // gesture pipeline AND what gets drawn — raw target is debug-only.
     const cursorPos = getCursorLandmark(lm)
-    const targetX = cursorPos.x * field.width
-    const targetY = cursorPos.y * field.height
+    const dpr = dprRef.current
+    const targetX = Math.max(0, Math.min(field.width,  cursorPos.x * field.width))
+    const targetY = Math.max(0, Math.min(field.height, cursorPos.y * field.height))
     c.rawTargetX = targetX
     c.rawTargetY = targetY
     const cursorFrozen = now < releaseFreezeUntil.current
@@ -619,201 +772,165 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
     } else if (!cursorFrozen) {
       const dx = targetX - c.x
       const dy = targetY - c.y
-      const dpr = dprRef.current
       const distPx = Math.hypot(dx, dy)
-      if (distPx > MOVEMENT_DEADZONE * dpr) {
-        c.x += dx * CURSOR_SMOOTHING
-        c.y += dy * CURSOR_SMOOTHING
+      // Deadzone: only move the smoothed cursor if the target is more than
+      // SIMPLE_DEADZONE_PX away. Kills the micro-twitch when the hand is
+      // basically still.
+      if (distPx > SIMPLE_DEADZONE_PX * dpr) {
+        c.x += dx * SIMPLE_CURSOR_LERP
+        c.y += dy * SIMPLE_CURSOR_LERP
       }
     }
     const stepPx = Math.hypot(c.x - c.lastX, c.y - c.lastY)
-    c.lastDelta = stepPx / dprRef.current
+    c.lastDelta = stepPx / dpr
     c.lastX = c.x; c.lastY = c.y
-    c.speedNorm = c.speedNorm * 0.7 + (stepPx / field.width) * 0.3
 
-    const movementThreshold = STROKE_MIN_MOVEMENT * dprRef.current
-    const editMode = modeRef.current === 'edit'
+    // ---------- Two-edge gesture detection ----------
+    // Pure hysteresis on the smoothed pixel distance: pinchRawNow already
+    // returns false the moment distance > PINCH_END_PX, so pinch release is
+    // immediate and finalize fires from the (wasPinching && !isPinching) branch.
+    // Smoothing on pinchPxSmooth (0.7 prev + 0.3 new) absorbs single-frame
+    // noise — no separate grace counter needed.
+    const wasPinching = !!ps.wasPinching
+    const justStarted = !wasPinching && isPinching
+    const justReleased = wasPinching && !isPinching
+    let stepFromLastDbg = 0
+    let distFromStartDbg = 0
 
-    // ---------- FSM ----------
-    switch (ps.state) {
-      case 'idle': {
-        if (pinchDetected) {
-          ps.state = 'pinchCandidate'
-          ps.pinchFrames = 1
-          ps.startTime = now
-          ps.startX = c.x
-          ps.startY = c.y
-        }
-        break
-      }
-      case 'pinchCandidate': {
-        if (pinchDetected) {
-          ps.pinchFrames++
-          if (ps.pinchFrames >= PINCH_CONFIRM_FRAMES) {
-            // Confirmed → enter drawing. Mode-specific entry.
-            ps.state = 'drawing'
-            ps.releaseFrames = 0
-            if (editMode) {
-              const hovered = findNearestObject(
-                field, c.x, c.y, EDIT_HOVER_RADIUS * dprRef.current,
-              )
-              if (hovered) {
-                try { stopStrokeSound(hovered.id) } catch {}
-                dissolveObject(field, hovered.id)
-                strokeMeta.current.delete(hovered.id)
-                roomApiRef.current?.sendStrokeRemove?.(hovered.id)
-              }
-            } else {
-              ps.mode = 'dot-preview'
-              ps.points = [{ x: c.x, y: c.y, speed: 0 }]
-              ps.lastPointX = c.x
-              ps.lastPointY = c.y
-              ps.maxMovement = 0
-              ps.strokeBegun = false
-              // Re-anchor start to the (now-stable) cursor at confirmation,
-              // not the noisy first-detection sample.
-              ps.startX = c.x
-              ps.startY = c.y
-              setDotPreview(field, c.x, c.y)
-            }
-          }
-        } else {
-          // Cancel — never drew, no points to discard.
-          ps.state = 'idle'
-          ps.pinchFrames = 0
-        }
-        break
-      }
-      case 'drawing': {
-        if (!pinchDetected) {
-          // Begin release confirmation. Don't add this frame's point —
-          // the user spec is "do NOT add points after release".
-          ps.state = 'releaseCandidate'
-          ps.releaseFrames = 1
-        } else if (!editMode) {
-          // Continue collecting in create mode. Edit mode just holds.
-          const distFromStart = Math.hypot(c.x - ps.startX, c.y - ps.startY)
-          ps.maxMovement = Math.max(ps.maxMovement, distFromStart)
-          const minStep = MIN_POINT_DISTANCE * dprRef.current
-          const dx = c.x - ps.lastPointX
-          const dy = c.y - ps.lastPointY
-          const farEnough = Math.hypot(dx, dy) >= minStep
+    if (justStarted) {
+      // Pinch-down: prep buffer, show dot preview at anchor.
+      ps.startX = c.x
+      ps.startY = c.y
+      ps.points = [{ x: c.x, y: c.y }]
+      ps.lastPointX = c.x
+      ps.lastPointY = c.y
+      ps.maxMovement = 0
+      ps.strokeBegun = false
+      ps.lastFinalizedType = null
+      setDotPreview(field, c.x, c.y)
+      console.log('[draw] PINCH START · cursor=', Math.round(c.x), Math.round(c.y),
+        '· px=', Math.round(ps.pinchPxSmooth))
+    } else if (wasPinching && isPinching) {
+      // Drag: collect points + maybe begin a stroke. Returning pinch resets
+      // any pending release-grace (we got pulled back from a near-release).
+      ps.releaseFrames = 0
+      const distFromStart = Math.hypot(c.x - ps.startX, c.y - ps.startY)
+      ps.maxMovement = Math.max(ps.maxMovement, distFromStart)
+      const stepFromLast = Math.hypot(c.x - ps.lastPointX, c.y - ps.lastPointY)
+      stepFromLastDbg = stepFromLast
+      distFromStartDbg = distFromStart
 
-          if (ps.maxMovement >= movementThreshold) {
-            if (!ps.strokeBegun) {
-              ps.mode = 'stroke-preview'
-              clearDotPreview(field)
-              beginStroke(field, localUser.color)
-              for (const p of ps.points) {
-                appendActivePoint(field, p.x, p.y, p.speed)
-              }
-              ps.strokeBegun = true
-            }
-            if (farEnough) {
-              ps.points.push({ x: c.x, y: c.y, speed: c.speedNorm })
-              ps.lastPointX = c.x
-              ps.lastPointY = c.y
-              appendActivePoint(field, c.x, c.y, c.speedNorm)
-            }
-          } else {
-            ps.mode = 'dot-preview'
-            setDotPreview(field, c.x, c.y)
-            if (farEnough) {
-              ps.points.push({ x: c.x, y: c.y, speed: c.speedNorm })
-              ps.lastPointX = c.x
-              ps.lastPointY = c.y
-            }
-          }
-        }
-        break
+      if (ps.maxMovement >= SIMPLE_STROKE_MIN_PX * dpr && !ps.strokeBegun) {
+        clearDotPreview(field)
+        beginStroke(field, userColorRef.current)
+        for (const p of ps.points) appendActivePoint(field, p.x, p.y, 0)
+        ps.strokeBegun = true
+        console.log('[draw] stroke begun · seeded', ps.points.length, 'points')
       }
-      case 'releaseCandidate': {
-        if (!pinchDetected) {
-          ps.releaseFrames++
-          if (ps.releaseFrames >= RELEASE_CONFIRM_FRAMES) {
-            if (editMode) {
-              ps.state = 'idle'
-              ps.pinchFrames = 0
-              ps.releaseFrames = 0
-            } else {
-              finalizeDraw()
-            }
-          }
-          // No point collection during release — see spec.
-        } else {
-          // False alarm — pinch is back. Resume drawing.
-          ps.state = 'drawing'
-          ps.releaseFrames = 0
-        }
-        break
+      if (stepFromLast >= SIMPLE_MIN_POINT_PX * dpr) {
+        ps.points.push({ x: c.x, y: c.y })
+        ps.lastPointX = c.x
+        ps.lastPointY = c.y
+        if (ps.strokeBegun) appendActivePoint(field, c.x, c.y, 0)
+      }
+      if (!ps.strokeBegun) setDotPreview(field, c.x, c.y)
+    } else if (justReleased) {
+      // Release-flicker grace: count non-pinch frames; finalize only after
+      // SIMPLE_RELEASE_CONFIRM_FRAMES consecutive ones. Cursor updates
+      // continue normally below — we just override the wasPinching commit
+      // so next frame still re-enters this branch.
+      ps.releaseFrames = (ps.releaseFrames || 0) + 1
+      if (ps.releaseFrames >= SIMPLE_RELEASE_CONFIRM_FRAMES) {
+        console.log('[draw] PINCH RELEASE · maxMovement=',
+          Math.round(ps.maxMovement / dpr), 'px · strokeBegun=', ps.strokeBegun,
+          '· px=', Math.round(ps.pinchPxSmooth))
+        const finalizedType = ps.strokeBegun ? 'stroke' : 'dot'
+        ps.lastFinalizedType = finalizedType
+        ps.lastFinalizedReason = 'release'
+        finalizeDraw()
+        ps.releaseFrames = 0
+        console.log(finalizedType === 'stroke'
+          ? '[draw] FINALIZED STROKE'
+          : '[draw] FINALIZED DOT')
       }
     }
+    // (drag branch above already runs while wasPinching && isPinching)
 
-    // ---------- Cursor + remote broadcast ----------
-    const isHeld = ps.state === 'drawing' || ps.state === 'releaseCandidate'
-    if (editMode) {
-      const hovered = findNearestObject(
-        field, c.x, c.y, EDIT_HOVER_RADIUS * dprRef.current,
-      )
-      setCursor(field, c.x, c.y, { visible: false, pinching: false, color: localUser.color })
-      setEditingCursor(field, c.x, c.y, {
-        gesture: isHeld ? 'fist' : 'palm',
-        hoveredId:
-          hovered &&
-          !field.dots.get(hovered.id)?.dissolving &&
-          !field.strokes.get(hovered.id)?.dissolving
-            ? hovered.id
-            : null,
-      })
-    } else {
-      clearEditingCursor(field)
-      setCursor(field, c.x, c.y, {
-        visible: true, pinching: isHeld, color: localUser.color,
-      })
-    }
+    // Commit pinch state. During release-grace (justReleased but counter
+    // not yet at threshold), pretend we're still pinching so we re-enter
+    // the justReleased branch next frame and the in-progress draw stays alive.
+    const inReleaseGrace = wasPinching && !isPinching
+      && (ps.releaseFrames || 0) > 0
+      && (ps.releaseFrames || 0) < SIMPLE_RELEASE_CONFIRM_FRAMES
+    ps.wasPinching = inReleaseGrace ? true : isPinching
 
-    // Broadcast cursor at ~30Hz throttle.
-    if (now - lastCursorSendAt.current > CURSOR_SEND_INTERVAL_MS) {
+    // Always-visible cursor; hide editing cursor (edit mode disabled).
+    clearEditingCursor(field)
+    setCursor(field, c.x, c.y, {
+      visible: true, pinching: isPinching, nearPinch, color: userColorRef.current,
+    })
+
+    // Multiplayer: broadcast cursor at ~30 Hz throttle. Normalized 0..1 so
+    // peers on different canvas sizes see it in the right place.
+    if (now - lastCursorSendAt.current > SIMPLE_CURSOR_SEND_MS) {
       lastCursorSendAt.current = now
       roomApiRef.current?.sendCursor?.({
         x: c.x / field.width,
         y: c.y / field.height,
-        pinching: isHeld,
-        editing: editMode,
+        pinching: isPinching,
         visible: true,
       })
     }
 
+    // Debug snapshot — throttled so we don't re-render at 60Hz.
     if (now - lastDebugAt.current > DEBUG_INTERVAL_MS) {
       lastDebugAt.current = now
       const v = videoRef.current
-      setDebug({
+      setDebug((d) => ({
+        ...d,
         handDetected: true,
-        pinching: isHeld,
-        pinchDistance: ps.pinchRatioSmooth,
-        pinchDuration: ps.state === 'drawing' || ps.state === 'releaseCandidate'
-          ? Math.round(now - ps.startTime) : 0,
-        mode: editMode ? `edit/${ps.state}` : (isHeld ? ps.mode : ps.state),
-        movementPx: Math.round(ps.maxMovement / dprRef.current),
+        pinching: isPinching,
+        justStarted,
+        justReleased,
+        activeStrokeExists: !!field.activeStroke,
+        nearPinch,
+        pinchPxRaw: Math.round(pinchPxRaw),
+        pinchPxSmooth: Math.round(ps.pinchPxSmooth),
+        pinchDistance: ps.pinchPxSmooth,  // legacy field name kept for any old refs
+        pinchFrames: ps.pinchFrames || 0,
+        mode: isPinching
+          ? (ps.strokeBegun ? 'stroke-preview' : 'dot-preview')
+          : (ps.releaseFrames > 0 ? `releasing(${ps.releaseFrames}/${SIMPLE_PINCH_DROP_GRACE_FRAMES})` : 'idle'),
+        movementPx: Math.round(ps.maxMovement / dpr),
+        distFromStartPx: Math.round(distFromStartDbg / dpr),
+        stepFromLastPx: Math.round(stepFromLastDbg / dpr),
+        strokeEligible: ps.maxMovement >= SIMPLE_STROKE_MIN_PX * dpr,
+        releaseFrames: ps.releaseFrames || 0,
+        missingFrames: ps.missingFrames || 0,
+        holdingStrokeOpen: !!ps.wasPinching,
+        activeStrokePoints: field.activeStroke?.points?.length || 0,
+        lastFinalizedType: ps.lastFinalizedType || '—',
+        lastFinalizedReason: ps.lastFinalizedReason || '—',
         rawX: lm[8].x,
         rawY: lm[8].y,
-        mappedX: Math.round(c.x / dprRef.current),
-        mappedY: Math.round(c.y / dprRef.current),
-        canvasW: Math.round(field.width / dprRef.current),
-        canvasH: Math.round(field.height / dprRef.current),
+        rawTargetX: Math.round((c.rawTargetX || 0) / dpr),
+        rawTargetY: Math.round((c.rawTargetY || 0) / dpr),
+        mappedX: Math.round(c.x / dpr),
+        mappedY: Math.round(c.y / dpr),
+        canvasW: Math.round(field.width / dpr),
+        canvasH: Math.round(field.height / dpr),
         videoW: v ? v.videoWidth : 0,
         videoH: v ? v.videoHeight : 0,
-        mirror: 'selfieMode',
-        speed: c.speedNorm,
         cursorDelta: c.lastDelta,
         activePoints: ps.points.length,
         visualStrokes: field.strokes.size,
         visualDots: field.dots.size,
+        remoteCursors: field.remoteCursors?.size || 0,
         activeSounds: getActiveSoundCount(),
         scheduledEvents: getScheduledEventCount(),
         audioStatus: getAudioStatus(),
         ...lastPhrase.current,
-      })
+      }))
     }
   }, [localUser])
 
@@ -855,13 +972,77 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
   }, [trackingStatus])
 
   // ---------- Controls ----------
-  const handleStartAudio = async () => {
+  // Pending = host has started audio for the room, but local audio is not
+  // yet unlocked (browser autoplay policy needs a user gesture).
+  const [audioPending, setAudioPending] = useState(false)
+
+  // Schedule audio playback for every drawing currently in the field —
+  // both local and remote. Used when audio unlocks after drawings already
+  // exist so the user immediately hears the shared composition.
+  // Determinism: each client uses the same drawing id, same normalized
+  // points, same BPM, so createPhraseFromStroke yields the same phrase
+  // and addDotAudio uses the same id-keyed handle. No randomness per call.
+  const scheduleAllExistingAudio = useCallback(() => {
+    const field = fieldRef.current
+    if (!field) return
+    let count = 0
+    for (const meta of strokeMeta.current.values()) {
+      try {
+        if (meta.type === 'dot') {
+          const p = meta.points?.[0]
+          if (p) { addDotAudio(meta.id, p.x, p.y); count++ }
+        } else if (meta.type === 'stroke') {
+          const pts = (meta.points || []).map((p) => ({
+            x: p.x * field.width, y: p.y * field.height,
+          }))
+          if (pts.length >= 2) {
+            const phrase = createPhraseFromStroke(pts, field.width, field.height, BPM)
+            if (phrase) { playStrokePhrase(meta.id, phrase); count++ }
+          }
+        }
+      } catch (err) {
+        console.warn('[audio] failed to schedule', meta.id, err)
+      }
+    }
+    console.log('[audio] scheduled', count, 'existing drawings')
+  }, [])
+
+  // Try to unlock local audio. Returns true on success. After unlocking,
+  // immediately schedule every drawing already on canvas so the listener
+  // joins the same composition everyone else is hearing.
+  const tryStartLocalAudio = useCallback(async () => {
     try {
       await startAudio()
       setAudioOn(true)
+      setAudioPending(false)
+      scheduleAllExistingAudio()
+      return true
     } catch (err) {
-      console.error('audio start failed', err)
+      console.warn('[audio] startAudio failed (likely autoplay block):', err?.message || err)
+      return false
     }
+  }, [scheduleAllExistingAudio])
+  // Mirror in a ref so socket handlers can call it without re-subscribing.
+  const tryStartLocalAudioRef = useRef(tryStartLocalAudio)
+  useEffect(() => { tryStartLocalAudioRef.current = tryStartLocalAudio }, [tryStartLocalAudio])
+
+  // Local-only "Start Audio" (still works offline). When in a room, also
+  // tells the room so other clients try to start.
+  const handleStartAudio = async () => {
+    const ok = await tryStartLocalAudio()
+    if (ok) roomApiRef.current?.sendAudioStart?.()
+  }
+
+  // Host-broadcast Start/Stop (room-wide).
+  const handleHostStartAudio = async () => {
+    await tryStartLocalAudio()
+    // Always emit, even if local unlock failed — peers may unlock fine.
+    roomApiRef.current?.sendAudioStart?.()
+  }
+  const handleHostStopAudio = () => {
+    setMasterMuted(true)
+    setMuted(true)
+    roomApiRef.current?.sendAudioStop?.()
   }
 
   const handleToggleMute = () => {
@@ -881,6 +1062,7 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
       strokePoints: 0, direction: '—', notes: [],
       phraseLength: 0, smoothness: 0, lengthCategory: '—',
     }
+    pinchState.current.lastFinalizedReason = 'manual clear'
     roomApiRef.current?.sendStrokesClear?.()
   }
 
@@ -900,6 +1082,17 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
     if (debug.pinching) return 'drawing'
     return 'listening'
   }, [audioOn, muted, debug.pinching, mode])
+
+  // Host = first joiner of the room (server-assigned); we are host when our
+  // user id matches room.hostId. Falls back to "treat me as host" if there's
+  // no server connection yet so the offline UX doesn't lose the buttons.
+  const isHost = !room.hostId || room.hostId === localUser.id
+  // Effective local user (server-assigned color overrides client placeholder).
+  const me = room.me || localUser
+  const remoteStrokesCount = useMemo(
+    () => Array.from(strokeMeta.current.values()).filter(m => !m.isLocal).length,
+    [debug.visualStrokes, debug.visualDots],
+  )
 
   return (
     <div className="canvas-page">
@@ -938,8 +1131,8 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
 
         <div className="tiles-scroll">
           <ParticipantTile
-            name={localUser.name}
-            color={localUser.color}
+            name={me.name}
+            color={me.color}
             status={localStatus}
             isLocal
             videoEl={tileVideoRef}
@@ -983,7 +1176,7 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
 
       <div
         className="self-view"
-        style={{ '--user-color': localUser.color }}
+        style={{ '--user-color': me.color }}
       >
         <video ref={videoRef} playsInline muted autoPlay />
         <canvas ref={overlayRef} />
@@ -991,8 +1184,8 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
           <span className="self-view-tracking">{trackingStatus}</span>
         )}
         <div className="self-view-label">
-          <span className="self-view-name">{localUser.name}</span>
-          <span className="self-view-status" style={{ color: localUser.color }}>
+          <span className="self-view-name">{me.name}</span>
+          <span className="self-view-status" style={{ color: me.color }}>
             {localStatus}
           </span>
         </div>
@@ -1004,10 +1197,29 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
         ) : (
           <button onClick={handleToggleMute}>{muted ? 'Unmute' : 'Mute'}</button>
         )}
+        {isHost && !room.audioPlaying && (
+          <button onClick={handleHostStartAudio} title="Start audio for everyone in the room">
+            Start Room Audio
+          </button>
+        )}
+        {isHost && room.audioPlaying && (
+          <button onClick={handleHostStopAudio} title="Stop audio for everyone in the room">
+            Stop Room Audio
+          </button>
+        )}
         <button onClick={handleClearInactive}>Clear Inactive</button>
         <button onClick={handleClear}>Clear Canvas</button>
         <button onClick={onLeave}>Back</button>
       </div>
+
+      {audioPending && (
+        <button
+          className="audio-pending-banner"
+          onClick={tryStartLocalAudio}
+        >
+          🔊 Host started audio — <b>tap to join sound</b>
+        </button>
+      )}
 
       <div className="debug-panel">
         <div className="row"><span>hand</span><b>{debug.handDetected ? 'yes' : 'no'}</b></div>
@@ -1030,10 +1242,66 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', onLeave })
         <div className="row"><span>camera error</span><b>{trackingError || '—'}</b></div>
         <div className="row separator"><span>tracking</span><b>—</b></div>
         <div className="row"><span>raw mp x/y</span><b>{debug.rawX.toFixed(3)}, {debug.rawY.toFixed(3)}</b></div>
+        <div className="row"><span>raw cursor px</span><b>{debug.rawTargetX || 0}, {debug.rawTargetY || 0}</b></div>
         <div className="row"><span>smoothed x/y</span><b>{debug.mappedX}, {debug.mappedY}</b></div>
         <div className="row"><span>canvas w/h</span><b>{debug.canvasW}×{debug.canvasH}</b></div>
         <div className="row"><span>video w/h</span><b>{debug.videoW}×{debug.videoH}</b></div>
         <div className="row"><span>mirror</span><b>{debug.mirror}</b></div>
+        <div className="row separator"><span>smoothing</span><b>—</b></div>
+        <div className="row"><span>cursor lerp</span><b>0.14</b></div>
+        <div className="row"><span>deadzone</span><b>3 px</b></div>
+        <div className="row"><span>min point dist</span><b>6 px</b></div>
+        <div className="row"><span>stroke threshold</span><b>25 px</b></div>
+        <div className="row separator"><span>pinch detection (px)</span><b>—</b></div>
+        <div className="row" style={{ fontSize: '0.95rem' }}>
+          <span>state</span>
+          <b style={{
+            color: debug.pinching ? '#6dffb1' : (debug.nearPinch ? '#ffd97e' : '#ff6d8e'),
+            fontWeight: 800,
+          }}>
+            {debug.pinching ? 'PINCHED' : (debug.nearPinch ? 'NEAR' : 'OPEN')}
+          </b>
+        </div>
+        <div className="row"><span>raw open/closed</span><b>{(debug.pinchPxRaw || 0) < 45 ? 'CLOSED' : 'OPEN'}</b></div>
+        <div className="row"><span>raw distance</span><b>{debug.pinchPxRaw || 0} px</b></div>
+        <div className="row"><span>smoothed distance</span><b>{debug.pinchPxSmooth || 0} px</b></div>
+        <div className="row"><span>PINCH_START_PX</span><b>45</b></div>
+        <div className="row"><span>PINCH_END_PX</span><b>70</b></div>
+        <div className="row"><span>near-pinch ≤</span><b>100 px</b></div>
+        <div className="row"><span>pinch active</span><b>{debug.pinching ? 'true' : 'false'}</b></div>
+        <div className="row"><span>just started</span><b>{debug.justStarted ? 'true' : 'false'}</b></div>
+        <div className="row"><span>just released</span><b>{debug.justReleased ? 'true' : 'false'}</b></div>
+        <div className="row"><span>activeStroke exists</span><b>{debug.activeStrokeExists ? 'true' : 'false'}</b></div>
+        <div className="row"><span>onset frames</span><b>{debug.pinchFrames || 0} / 2</b></div>
+        <div className="row"><span>missing-hand grace</span><b>10 frames</b></div>
+        <div className="row"><span>release freeze</span><b>120 ms</b></div>
+        <div className="row separator"><span>long-stroke pipeline</span><b>—</b></div>
+        <div className="row"><span>holding stroke open</span><b>{debug.holdingStrokeOpen ? 'true' : 'false'}</b></div>
+        <div className="row"><span>active stroke pts</span><b>{debug.activeStrokePoints || 0}</b></div>
+        <div className="row"><span>dist from start</span><b>{debug.distFromStartPx || 0}px</b></div>
+        <div className="row"><span>step from last</span><b>{debug.stepFromLastPx || 0}px</b></div>
+        <div className="row"><span>stroke eligible</span><b>{debug.strokeEligible ? 'yes' : 'no'}</b></div>
+        <div className="row"><span>pinch lost frames</span><b>{debug.releaseFrames || 0} / 10</b></div>
+        <div className="row"><span>hand missing frames</span><b>{debug.missingFrames || 0} / 10</b></div>
+        <div className="row"><span>last finalized</span><b>{debug.lastFinalizedType || '—'}</b></div>
+        <div className="row"><span>finalized because</span><b>{debug.lastFinalizedReason || '—'}</b></div>
+        <div className="row separator"><span>multiplayer</span><b>—</b></div>
+        <div className="row"><span>socket connected</span><b>{room.connected ? 'yes' : 'no'}</b></div>
+        <div className="row"><span>room code</span><b>{roomCode || '—'}</b></div>
+        <div className="row"><span>local user id</span><b>{localUser.id}</b></div>
+        <div className="row"><span>host id</span><b>{room.hostId || '—'}</b></div>
+        <div className="row"><span>am I host</span><b>{isHost ? 'yes' : 'no'}</b></div>
+        <div className="row"><span>participants</span><b>{room.participants.length + 1}</b></div>
+        <div className="row"><span>participant ids</span><b style={{ fontSize: '0.7rem' }}>
+          {[localUser, ...room.participants].map(p => p.name).join(', ')}
+        </b></div>
+        <div className="row"><span>remote cursors</span><b>{debug.remoteCursors || 0}</b></div>
+        <div className="row"><span>shared drawings</span><b>{strokeMeta.current.size}</b></div>
+        <div className="row"><span>remote drawings</span><b>{remoteStrokesCount}</b></div>
+        <div className="row"><span>room audio state</span><b>{room.audioPlaying ? 'playing' : 'stopped'}</b></div>
+        <div className="row"><span>local audio unlocked</span><b>{audioOn ? 'yes' : 'no'}</b></div>
+        <div className="row"><span>audio pending</span><b>{audioPending ? 'yes' : 'no'}</b></div>
+        <div className="row"><span>scheduled layers</span><b>{debug.activeSounds || 0} / {MAX_ACTIVE_STROKES}</b></div>
         <div className="row separator"><span>audio</span><b>—</b></div>
         <div className="row"><span>status</span><b>{debug.audioStatus}</b></div>
         <div className="row"><span>active sounds</span><b>{debug.activeSounds} / {MAX_ACTIVE_STROKES}</b></div>
