@@ -1,5 +1,29 @@
 import { useEffect, useRef, useState } from 'react'
 
+// Load @mediapipe/hands via a <script> tag from CDN instead of an ES import.
+// The npm package is UMD with eval-ish patterns that Vite mangles in
+// production builds, causing the dynamic import to hang. Loading the
+// official CDN bundle as a global script avoids the bundler entirely;
+// `locateFile` then points the WASM/model fetches at the same CDN.
+let handsScriptPromise = null
+function loadHandsScript() {
+  if (typeof window === 'undefined') return Promise.reject(new Error('no window'))
+  if (window.Hands) return Promise.resolve(window.Hands)
+  if (handsScriptPromise) return handsScriptPromise
+  handsScriptPromise = new Promise((resolve, reject) => {
+    const s = document.createElement('script')
+    s.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js'
+    s.crossOrigin = 'anonymous'
+    s.onload = () => {
+      if (window.Hands) resolve(window.Hands)
+      else reject(new Error('hands.js loaded but window.Hands missing'))
+    }
+    s.onerror = () => reject(new Error('failed to fetch hands.js from CDN'))
+    document.head.appendChild(s)
+  })
+  return handsScriptPromise
+}
+
 const HAND_CONNECTIONS = [
   [0, 1], [1, 2], [2, 3], [3, 4],
   [0, 5], [5, 6], [6, 7], [7, 8],
@@ -129,8 +153,7 @@ export function useHandTracking({ videoRef, overlayRef, enabled, onResults, maxN
       setStatus('loading')
       let Hands
       try {
-        const handsMod = await import('@mediapipe/hands')
-        Hands = handsMod.Hands
+        Hands = await loadHandsScript()
       } catch (err) {
         fail('Could not load hand-tracking model: ' + (err?.message || err))
         return
