@@ -1,0 +1,21 @@
+name: sonasketch
+region: nyc
+services:
+  - name: web
+    github:
+      repo: cvd9683-gif/sonasketch
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    environment_slug: node-js
+    instance_size_slug: basic-xxs
+    instance_count: 1
+    http_port: 3000
+    build_command: npm ci && npm run build
+    run_command: npm start
+    health_check:
+      http_path: /
+    envs:
+      - key: NODE_ENV
+        scope: RUN_TIME
+        value: production
