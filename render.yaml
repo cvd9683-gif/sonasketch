@@ -13,7 +13,7 @@ services:
     runtime: node
     plan: free
     autoDeploy: true
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /
     envVars:
