@@ -118,15 +118,20 @@ function PhotoStep({ name, avatar, onAvatar, onBack, onSkip, onContinue }) {
         video: { width: 320, height: 240 }, audio: false,
       })
       streamRef.current = s
-      const v = videoRef.current
-      if (v) {
-        v.srcObject = s
-        await v.play().catch(() => {})
-      }
+      // The <video> only mounts once status is 'live', so the stream is
+      // attached in attachVideo (callback ref) rather than here.
       setStatus('live')
     } catch (e) {
       setStatus('denied')
       setErr(e?.message || 'Camera unavailable')
+    }
+  }
+
+  const attachVideo = (v) => {
+    videoRef.current = v
+    if (v && streamRef.current && v.srcObject !== streamRef.current) {
+      v.srcObject = streamRef.current
+      v.play().catch(() => {})
     }
   }
 
@@ -173,7 +178,7 @@ function PhotoStep({ name, avatar, onAvatar, onBack, onSkip, onContinue }) {
         {avatar ? (
           <img className="photo-preview" src={avatar} alt="Your photo" />
         ) : status === 'live' ? (
-          <video ref={videoRef} className="photo-preview live" playsInline muted autoPlay />
+          <video ref={attachVideo} className="photo-preview live" playsInline muted autoPlay />
         ) : (
           <div className="photo-placeholder">
             <span>{getInitials(name)}</span>
