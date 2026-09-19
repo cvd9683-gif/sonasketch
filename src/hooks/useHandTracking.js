@@ -42,7 +42,7 @@ const HAND_CONNECTIONS = [
 //     an actionable message, and report tracks/permission state to the UI.
 //   - It also lets us reliably stop every track on unmount so the camera
 //     light goes off (the helper sometimes leaks the underlying stream).
-export function useHandTracking({ videoRef, overlayRef, enabled, onResults, maxNumHands = 1 }) {
+export function useHandTracking({ videoRef, overlayRef, enabled, onResults, maxNumHands = 1, debugOverlay = true }) {
   const handsRef = useRef(null)
   const streamRef = useRef(null)
   const rafRef = useRef(0)
@@ -61,6 +61,8 @@ export function useHandTracking({ videoRef, overlayRef, enabled, onResults, maxN
   })
 
   useEffect(() => { onResultsRef.current = onResults }, [onResults])
+  const debugOverlayRef = useRef(debugOverlay)
+  useEffect(() => { debugOverlayRef.current = debugOverlay }, [debugOverlay])
 
   useEffect(() => {
     if (!enabled) return
@@ -173,7 +175,7 @@ export function useHandTracking({ videoRef, overlayRef, enabled, onResults, maxN
         minTrackingConfidence: 0.5,
       })
       hands.onResults((results) => {
-        drawOverlay(overlayRef.current, results)
+        drawOverlay(overlayRef.current, results, debugOverlayRef.current)
         onResultsRef.current?.(results)
       })
       handsRef.current = hands
@@ -229,7 +231,9 @@ export function useHandTracking({ videoRef, overlayRef, enabled, onResults, maxN
 const OVERLAY_PINCH_START_PX = 45
 const OVERLAY_PINCH_END_PX = 70
 
-function drawOverlay(canvas, results) {
+// debug=false (canvas page) keeps the skeleton but drops the pixel-distance
+// label and the PINCHED/OPEN pill, and uses the app palette for the tips.
+function drawOverlay(canvas, results, debug = true) {
   if (!canvas) return
   const ctx = canvas.getContext('2d')
   const w = canvas.width
@@ -269,6 +273,22 @@ function drawOverlay(canvas, results) {
     const isPinched = distPx < OVERLAY_PINCH_START_PX
     const isNear = !isPinched && distPx < OVERLAY_PINCH_END_PX
     const lineColor = isPinched ? '#6dffb1' : (isNear ? '#ffd97e' : '#ff6d8e')
+
+    if (!debug) {
+      ctx.strokeStyle = isPinched ? '#ff8ec7' : 'rgba(255, 255, 255, 0.35)'
+      ctx.lineWidth = 2
+      ctx.beginPath()
+      ctx.moveTo(tx, ty)
+      ctx.lineTo(ix, iy)
+      ctx.stroke()
+      ctx.fillStyle = isPinched ? '#ff8ec7' : '#c97bff'
+      for (const [x, y] of [[tx, ty], [ix, iy]]) {
+        ctx.beginPath()
+        ctx.arc(x, y, 6, 0, Math.PI * 2)
+        ctx.fill()
+      }
+      continue
+    }
 
     ctx.strokeStyle = lineColor
     ctx.lineWidth = 2

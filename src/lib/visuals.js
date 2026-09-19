@@ -52,6 +52,13 @@ export function createField({ width, height }) {
     // Remote participants' cursors. userId → { nx, ny, pinching, color, name, lastSeen }
     // Stored in normalized 0..1 so we don't have to rescale on resize.
     remoteCursors: new Map(),
+    // Sound-layer linkage, written by Canvas.jsx from the layer panel:
+    //   layerLabels: id → slot number (1..8) drawn beside each sounding mark
+    //   highlightId: mark to outline while its layer row is hovered/focused
+    layerLabels: new Map(),
+    highlightId: null,
+    // Skips the traveling highlight when the OS asks for reduced motion.
+    reducedMotion: false,
     nextId: 1,
     // Prefix every locally-generated id with this so the same numeric counter
     // on two clients can't collide. Set by Canvas.jsx after construction.
@@ -241,6 +248,20 @@ export function pulseStrokeAt(field, strokeId, nx, ny) {
   const y = ny * field.height
   s.pulses.push({ x, y, life: 1 })
   if (s.pulses.length > 24) s.pulses.shift()
+  // Whole-stroke brighten, so the mark that owns the sound reads at a glance.
+  s.flash = 1
+  // Traveling highlight: a short bright segment that runs forward along the
+  // stroke from the point that just sounded.
+  if (field.reducedMotion || s.visualOnly) return
+  let best = 0, bestD = Infinity
+  const pts = s.points
+  for (let i = 0; i < pts.length; i++) {
+    const d = (pts[i].x - x) ** 2 + (pts[i].y - y) ** 2
+    if (d < bestD) { bestD = d; best = i }
+  }
+  if (!s.sparks) s.sparks = []
+  s.sparks.push({ i: best, life: 1 })
+  if (s.sparks.length > 4) s.sparks.shift()
 }
 
 /**
@@ -295,6 +316,7 @@ export function clearStrokes(field) {
   field.dotPreview = null
   field.activeStroke = null
   field.hoveredId = null
+  field.highlightId = null
 }
 
 // Multiplayer: write/clear a remote participant's cursor.
@@ -385,6 +407,11 @@ export function step(field, dt) {
   for (const [id, s] of field.strokes) {
     for (const p of s.pulses) p.life -= dt * 3.5
     s.pulses = s.pulses.filter((p) => p.life > 0)
+    if (s.flash) s.flash = Math.max(0, s.flash - dt * 2.4)
+    if (s.sparks && s.sparks.length) {
+      for (const sp of s.sparks) { sp.i += dt * 28; sp.life -= dt * 2.2 }
+      s.sparks = s.sparks.filter((sp) => sp.life > 0 && sp.i < s.points.length + 4)
+    }
     if (s.dissolving) {
       s.dissolveLife -= dt * 4 // ~250ms full dissolve
       if (s.dissolveLife <= 0) field.strokes.delete(id)
@@ -407,9 +434,14 @@ export function step(field, dt) {
 export function render(ctx, field, { loopPhase = 0 } = {}) {
   const { width, height } = field
 
-  // Soft motion-blur fill so strokes feel like they're glowing on a slate
-  ctx.fillStyle = 'rgba(7, 8, 13, 0.22)'
+  // Soft motion-blur trail: fade what's already drawn toward transparent
+  // (the page background shows through). Fading with destination-out rather
+  // than painting translucent black avoids 8-bit rounding leaving permanent
+  // grey discs wherever a note pulsed.
+  ctx.globalCompositeOperation = 'destination-out'
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.22)'
   ctx.fillRect(0, 0, width, height)
+  ctx.globalCompositeOperation = 'source-over'
 
   ctx.globalCompositeOperation = 'lighter'
 
@@ -417,12 +449,14 @@ export function render(ctx, field, { loopPhase = 0 } = {}) {
   const breath = 0.78 + 0.22 * Math.sin(loopPhase * Math.PI * 2)
 
   for (const [id, stroke] of field.strokes) {
-    drawStroke(ctx, stroke, breath, id === field.hoveredId)
+    drawStroke(ctx, stroke, breath, id === field.hoveredId, id === field.highlightId)
   }
 
   for (const [id, dot] of field.dots) {
-    drawDot(ctx, dot, breath, id === field.hoveredId)
+    drawDot(ctx, dot, breath, id === field.hoveredId, id === field.highlightId)
   }
+
+  if (field.layerLabels.size) drawLayerLabels(ctx, field)
 
   // Mutually exclusive: never both at once.
   // - dotPreview is set while pinching with little movement.
@@ -511,7 +545,7 @@ function drawAvatarCursor(ctx, x, y, { color, pinching, avatarImg, name }) {
     ctx.fill()
     const initials = getInitials(name)
     ctx.fillStyle = color
-    ctx.font = `bold ${avatarR * 0.95}px system-ui, sans-serif`
+    ctx.font = `600 ${avatarR * 0.95}px 'Instrument Sans', system-ui, sans-serif`
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
     ctx.fillText(initials, x, y + 1)
@@ -528,7 +562,7 @@ function drawAvatarCursor(ctx, x, y, { color, pinching, avatarImg, name }) {
 }
 
 // Permanent dot: glowing orb with outer ring. Distinct from strokes' lines.
-function drawDot(ctx, dot, breath, hovered = false) {
+function drawDot(ctx, dot, breath, hovered = false, highlighted = false) {
   // Dissolve alpha multiplier. 1 normally; <1 while animating delete.
   const dissolve = dot.dissolving ? Math.max(0, dot.dissolveLife) : 1
   // Slight expansion during dissolve for a "pop out" feel
@@ -566,6 +600,16 @@ function drawDot(ctx, dot, breath, hovered = false) {
     ctx.arc(dot.x, dot.y, baseR * 2.1, 0, Math.PI * 2)
     ctx.stroke()
   }
+  if (highlighted) {
+    // Redrawn every frame over the 0.22 trail fade, so it settles near 0.55.
+    ctx.strokeStyle = hexToRgba('#ffffff', 0.12)
+    ctx.lineWidth = 1.5
+    ctx.setLineDash([3, 5])
+    ctx.beginPath()
+    ctx.arc(dot.x, dot.y, baseR * 2.4, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.setLineDash([])
+  }
 }
 
 // Live preview during dot-preview mode. Continuous pulse so the user can
@@ -594,7 +638,7 @@ function drawDotPreview(ctx, preview) {
   ctx.fill()
 }
 
-function drawStroke(ctx, stroke, breath, hovered = false) {
+function drawStroke(ctx, stroke, breath, hovered = false, highlighted = false) {
   const pts = stroke.points
   if (pts.length < 2) return
 
@@ -609,9 +653,9 @@ function drawStroke(ctx, stroke, breath, hovered = false) {
     ctx.strokeStyle = hexToRgba(stroke.color, 0.32 * dissolve)
     ctx.lineWidth = 1.2
     drawPath(ctx, pts)
-    if (hovered) {
-      ctx.strokeStyle = hexToRgba('#ffffff', 0.4)
-      ctx.lineWidth = 14
+    if (hovered || highlighted) {
+      ctx.strokeStyle = hexToRgba('#ffffff', highlighted && !hovered ? 0.05 : 0.4)
+      ctx.lineWidth = highlighted && !hovered ? 8 : 14
       drawPath(ctx, pts)
     }
     return
@@ -619,42 +663,97 @@ function drawStroke(ctx, stroke, breath, hovered = false) {
 
   // Active strokes get the full glowing treatment.
   const dim = dissolve
+  // flash: 1 the moment one of this stroke's notes sounds, easing to 0.
+  const flash = stroke.flash || 0
 
   // Outer glow
-  ctx.strokeStyle = hexToRgba(stroke.color, 0.18 * breath * dim)
+  ctx.strokeStyle = hexToRgba(stroke.color, (0.18 * breath + flash * 0.1) * dim)
   ctx.lineWidth = 14
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
   drawPath(ctx, pts)
 
   // Mid glow
-  ctx.strokeStyle = hexToRgba(stroke.color, 0.4 * breath * dim)
+  ctx.strokeStyle = hexToRgba(stroke.color, (0.4 * breath + flash * 0.18) * dim)
   ctx.lineWidth = 6
   drawPath(ctx, pts)
 
   // Core line
-  ctx.strokeStyle = hexToRgba(stroke.color, 0.85 * breath * dim)
-  ctx.lineWidth = 2
+  ctx.strokeStyle = hexToRgba(stroke.color, Math.min(1, 0.85 * breath + flash * 0.15) * dim)
+  ctx.lineWidth = 2 + flash * 0.8
   drawPath(ctx, pts)
 
   if (hovered) {
     ctx.strokeStyle = hexToRgba('#ffffff', 0.55)
     ctx.lineWidth = 18
     drawPath(ctx, pts)
+  } else if (highlighted) {
+    // Settles near 0.25 under the trail fade — a soft sheath, not a white-out.
+    ctx.strokeStyle = hexToRgba('#ffffff', 0.055)
+    ctx.lineWidth = 10
+    drawPath(ctx, pts)
   }
 
-  // Per-note pulses traveling on the stroke
+  // Traveling highlight: a short white segment moving forward along the line.
+  if (stroke.sparks && stroke.sparks.length) {
+    for (const sp of stroke.sparks) {
+      const head = Math.min(pts.length - 1, Math.floor(sp.i))
+      const tail = Math.max(0, head - 5)
+      if (head - tail < 1) continue
+      ctx.strokeStyle = hexToRgba('#ffffff', 0.7 * Math.max(0, sp.life) * dim)
+      ctx.lineWidth = 2.5
+      drawPath(ctx, pts.slice(tail, head + 1))
+    }
+  }
+
+  // Per-note pulses at the point that sounded
   for (const p of stroke.pulses) {
     const a = Math.max(0, Math.min(1, p.life))
-    const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 36)
-    grad.addColorStop(0, hexToRgba('#ffffff', 0.95 * a))
-    grad.addColorStop(0.4, hexToRgba(stroke.color, 0.6 * a))
+    const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 30)
+    grad.addColorStop(0, hexToRgba('#ffffff', 0.8 * a))
+    grad.addColorStop(0.4, hexToRgba(stroke.color, 0.5 * a))
     grad.addColorStop(1, hexToRgba(stroke.color, 0))
     ctx.fillStyle = grad
     ctx.beginPath()
-    ctx.arc(p.x, p.y, 36, 0, Math.PI * 2)
+    ctx.arc(p.x, p.y, 30, 0, Math.PI * 2)
     ctx.fill()
   }
+}
+
+// Small slot numbers beside each sounding mark so the canvas and the sound
+// layer panel share one vocabulary ("3" on the canvas = layer 3).
+function drawLayerLabels(ctx, field) {
+  const dpr = field.width / Math.max(1, ctx.canvas.clientWidth || field.width)
+  ctx.font = `500 ${Math.round(11 * dpr)}px 'JetBrains Mono', ui-monospace, monospace`
+  ctx.textBaseline = 'middle'
+  ctx.textAlign = 'center'
+  for (const [id, n] of field.layerLabels) {
+    let x, y, color, flash = 0
+    const s = field.strokes.get(id)
+    if (s && s.points.length) {
+      if (s.dissolving) continue
+      const p0 = s.points[0], p1 = s.points[Math.min(3, s.points.length - 1)]
+      // Offset back from the stroke's start, opposite its initial direction.
+      const dx = p0.x - p1.x, dy = p0.y - p1.y
+      const len = Math.hypot(dx, dy) || 1
+      x = p0.x + (dx / len) * 16 * dpr
+      y = p0.y + (dy / len) * 16 * dpr
+      color = s.color
+      flash = s.flash || 0
+    } else {
+      const d = field.dots.get(id)
+      if (!d || d.dissolving) continue
+      x = d.x + 26 * dpr
+      y = d.y - 26 * dpr
+      color = d.color
+      flash = d.pulse?.life || 0
+    }
+    // Settles near 0.55 (0.12 / 0.22 trail fade), brighter when it sounds.
+    ctx.fillStyle = hexToRgba(color, 0.12 + flash * 0.1)
+    ctx.fillText(String(n), x, y)
+  }
+  ctx.textAlign = 'start'
+  ctx.textBaseline = 'alphabetic'
 }
 
 function drawActiveStroke(ctx, stroke) {

@@ -9,10 +9,13 @@
   --accent-3: #ff8ec7;
   --accent-4: #ffd97e;
   --border: rgba(255, 255, 255, 0.08);
+  --hair: rgba(255, 255, 255, 0.09);
+  --font-display: 'Space Grotesk', 'Instrument Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
   /* Height of the top "room bar". Other overlays anchor below it via
      calc(var(--row-h) + offset), so changing this here moves everything. */
   --row-h: clamp(80px, 11vh, 104px);
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-family: 'Instrument Sans', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   color-scheme: dark;
 }
 
@@ -50,6 +53,12 @@ button {
 button:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.09);
   border-color: rgba(255, 255, 255, 0.18);
+}
+
+button:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 button:active:not(:disabled) {
@@ -151,6 +160,7 @@ input:focus {
 }
 
 .landing .title {
+  font-family: var(--font-display);
   font-size: clamp(3rem, 7vw, 5.4rem);
   font-weight: 300;
   letter-spacing: -0.02em;
@@ -224,7 +234,8 @@ input:focus {
 }
 
 .name-entry-title {
-  font-weight: 300;
+  font-family: var(--font-display);
+  font-weight: 400;
   font-size: 1.5rem;
   letter-spacing: -0.01em;
   background: linear-gradient(135deg, #fff, var(--accent));
@@ -339,7 +350,8 @@ input:focus {
 }
 
 .calibration h2 {
-  font-weight: 400;
+  font-family: var(--font-display);
+  font-weight: 500;
   font-size: 1.25rem;
   letter-spacing: -0.01em;
 }
@@ -475,19 +487,22 @@ input:focus {
 }
 
 /* ---------- Canvas page ----------
-   Layout model:
-     - .canvas-page is the viewport container; canvas.stage is a full-bleed
-       backdrop everything else floats over.
-     - .participant-row is full-width sticky at the top (height = --row-h).
-     - .self-view floats top-right just under the row, FaceTime-style.
-     - .controls live bottom-left; .debug-panel lives top-left under the row.
-     - All overlays use absolute positioning so the canvas can fill the
-       entire viewport — drawings under the translucent participant row are
-       intentionally still visible (faintly) to reinforce the shared space.
+   The drawing is the instrument; everything else sits at its edges.
+     - canvas.stage is full-bleed; overlays are absolutely positioned.
+     - .topbar: wordmark + room, mode, instruction, presence.
+     - .gesture: open/pinch readout, top-left of the canvas.
+     - .sound-layers: right rail, above the floating .self-view.
+     - .controls: bottom-left, one primary action then quieter ones.
+   Hierarchy comes from type, spacing and hairlines — not from cards.
 */
 .canvas-page {
+  --bar-h: 64px;
+  --edge: 20px;
+  --rail-w: 248px;
+  --self-w: clamp(176px, 15vw, 224px);
   position: absolute;
   inset: 0;
+  background: var(--bg-0);
 }
 
 .canvas-page canvas.stage {
@@ -498,268 +513,183 @@ input:focus {
   display: block;
 }
 
-/* ===== Top "room bar" — full-width participant strip ===== */
-.canvas-page .participant-row {
+.canvas-page .mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Shared quiet button styles */
+.canvas-page .text-btn {
+  background: none;
+  border: none;
+  border-radius: 3px;
+  padding: 0.3rem 0.1rem;
+  color: var(--fg-dim);
+  font-size: 0.82rem;
+  letter-spacing: 0;
+  text-underline-offset: 4px;
+  transition: color 0.15s ease;
+}
+.canvas-page .text-btn:hover:not(:disabled) {
+  background: none;
+  color: var(--fg);
+  text-decoration: underline;
+  text-decoration-color: var(--hair);
+}
+.canvas-page .text-btn:active:not(:disabled) { transform: none; color: var(--accent); }
+
+/* ===== Top bar ===== */
+.canvas-page .topbar {
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
-  height: var(--row-h);
+  height: var(--bar-h);
   display: flex;
-  align-items: stretch;
-  gap: 0.65rem;
-  padding: 0.55rem 0.9rem;
-  background: linear-gradient(
-    to bottom,
-    rgba(7, 8, 13, 0.85),
-    rgba(7, 8, 13, 0.55) 70%,
-    rgba(7, 8, 13, 0)
-  );
-  backdrop-filter: blur(14px);
-  border-bottom: 1px solid var(--border);
+  align-items: center;
+  gap: 2rem;
+  padding: 0 var(--edge);
+  background: rgba(7, 8, 13, 0.84);
+  border-bottom: 1px solid var(--hair);
   z-index: 5;
 }
 
-.canvas-page .room-chip,
-.canvas-page .hint-chip {
-  flex: 0 0 auto;
-  background: rgba(10, 12, 22, 0.55);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 0.5rem 0.85rem;
+.canvas-page .topbar-id {
   display: flex;
-  flex-direction: column;
-  justify-content: center;
+  align-items: baseline;
+  gap: 1.1rem;
   min-width: 0;
 }
 
-/* ===== Create / Edit mode segmented toggle ===== */
-.canvas-page .mode-toggle {
-  flex: 0 0 auto;
-  align-self: center;
-  display: inline-flex;
-  background: rgba(10, 12, 22, 0.6);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 3px;
-}
-
-.canvas-page .mode-toggle button {
-  background: transparent;
-  border: none;
-  color: var(--fg-dim);
-  padding: 0.42rem 0.9rem;
-  border-radius: 999px;
-  font-size: 0.78rem;
-  letter-spacing: 0.05em;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  cursor: pointer;
-  transition: background 0.18s ease, color 0.18s ease;
-}
-
-.canvas-page .mode-toggle button:hover:not(.active) {
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--fg);
-}
-
-.canvas-page .mode-toggle button.active {
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  color: #0a0c14;
+.canvas-page .wordmark {
+  font-family: var(--font-display);
   font-weight: 600;
-}
-
-.canvas-page .mode-toggle button .key {
-  font-family: ui-monospace, monospace;
-  font-size: 0.6rem;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 4px;
-  padding: 1px 5px;
-  color: var(--fg-dim);
-  letter-spacing: 0;
-}
-
-.canvas-page .mode-toggle button.active .key {
-  border-color: rgba(0, 0, 0, 0.3);
-  color: rgba(10, 12, 20, 0.7);
-}
-
-.canvas-page .room-chip .label,
-.canvas-page .hint-chip .hint-sub {
-  font-size: 0.62rem;
-  letter-spacing: 0.18em;
-  color: var(--fg-dim);
-  text-transform: uppercase;
-}
-
-.canvas-page .room-chip .code {
-  font-family: ui-monospace, monospace;
-  font-size: 1rem;
-  letter-spacing: 0.22em;
+  font-size: 1.4rem;
+  letter-spacing: -0.03em;
+  line-height: 1;
   color: var(--fg);
-  margin-top: 0.1rem;
+  white-space: nowrap;
 }
 
 .canvas-page .room-chip {
-  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding-left: 1.1rem;
+  border-left: 1px solid var(--hair);
+  white-space: nowrap;
 }
-
-.canvas-page .live-dot {
-  position: absolute;
-  top: 0.5rem;
-  right: 0.55rem;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #444;
-  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
+.canvas-page .room-chip .label {
+  font-size: 0.8rem;
+  color: var(--fg-dim);
 }
-.canvas-page .live-dot.on {
-  background: #6dffb1;
-  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35), 0 0 8px rgba(109, 255, 177, 0.7);
-}
-
-.canvas-page .share-chip {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.05rem;
-  padding: 0.45rem 0.7rem;
-  background: rgba(126, 226, 255, 0.08);
-  border: 1px solid rgba(126, 226, 255, 0.35);
-  border-radius: 10px;
+.canvas-page .room-chip .code {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
   color: var(--fg);
-  cursor: pointer;
-  font: inherit;
-  text-align: left;
-  transition: background 120ms;
 }
-.canvas-page .share-chip:hover {
-  background: rgba(126, 226, 255, 0.16);
+.canvas-page .live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #3a3d48;
+  align-self: center;
+  transition: background 0.3s ease;
 }
-.canvas-page .share-chip .share-label {
-  font-size: 0.62rem;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  color: rgba(255, 255, 255, 0.55);
+.canvas-page .live-dot.on { background: var(--accent); }
+.canvas-page .share-chip {
+  margin-left: 0.35rem;
+  color: var(--accent);
+  font-size: 0.8rem;
 }
-.canvas-page .share-chip .share-url {
-  font-family: ui-monospace, monospace;
-  font-size: 0.78rem;
-  color: #7ee2ff;
-  letter-spacing: 0.02em;
-}
+.canvas-page .share-chip:hover:not(:disabled) { color: var(--fg); }
 
-.canvas-page .audio-pending-banner {
-  position: fixed;
-  bottom: 1.4rem;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 50;
-  padding: 0.7rem 1.1rem;
-  background: rgba(126, 226, 255, 0.18);
-  border: 1px solid rgba(126, 226, 255, 0.55);
-  color: #f5fbff;
-  border-radius: 999px;
-  font: inherit;
-  font-size: 0.95rem;
-  cursor: pointer;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
-  animation: audio-pending-pulse 1.6s ease-in-out infinite;
+/* Mode: plain words with an underline, not a pill. */
+.canvas-page .mode-toggle {
+  display: flex;
+  align-self: stretch;
+  gap: 1.4rem;
 }
-.canvas-page .audio-pending-banner:hover {
-  background: rgba(126, 226, 255, 0.28);
+.canvas-page .mode-toggle button {
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 0 0.1rem;
+  color: var(--fg-dim);
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  box-shadow: inset 0 -2px 0 transparent;
+  transition: color 0.15s ease, box-shadow 0.2s ease;
 }
-@keyframes audio-pending-pulse {
-  0%, 100% { box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45), 0 0 0 0 rgba(126, 226, 255, 0.4); }
-  50%      { box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45), 0 0 0 12px rgba(126, 226, 255, 0); }
+.canvas-page .mode-toggle button:hover:not(.active) {
+  background: none;
+  color: var(--fg);
+}
+.canvas-page .mode-toggle button:active:not(:disabled) { transform: none; }
+.canvas-page .mode-toggle button.active {
+  color: var(--fg);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.canvas-page.mode-edit .mode-toggle button.active {
+  box-shadow: inset 0 -2px 0 var(--accent-3);
+}
+.canvas-page .mode-toggle .key {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 400;
+  color: var(--fg-dim);
+  border: 1px solid var(--hair);
+  border-radius: 3px;
+  padding: 0 0.3rem;
+  line-height: 1.5;
 }
 
 .canvas-page .hint-chip {
-  text-align: right;
-}
-
-.canvas-page .hint-chip .hint-title {
-  font-size: 0.82rem;
-  color: var(--fg);
-  letter-spacing: 0.04em;
-}
-
-.canvas-page .hint-chip .hint-sub {
-  margin-top: 0.15rem;
-}
-
-/* Tiles area takes the rest of the row, scrolls horizontally if it overflows */
-.canvas-page .tiles-scroll {
   flex: 1 1 auto;
   min-width: 0;
-  display: flex;
-  align-items: stretch;
-  gap: 0.55rem;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
-  padding: 0 0.15rem;
+  text-align: right;
+  font-size: 0.92rem;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+.canvas-page .hint-chip .hint-title { color: var(--fg); }
 
-.canvas-page .tiles-scroll::-webkit-scrollbar {
-  height: 4px;
+/* Presence: small avatars, name + status beside them. */
+.canvas-page .tiles-scroll {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  max-width: 34vw;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
-.canvas-page .tiles-scroll::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.18);
-  border-radius: 2px;
-}
+.canvas-page .tiles-scroll::-webkit-scrollbar { display: none; }
 
 .canvas-page .participant-tile {
   flex: 0 0 auto;
-  width: clamp(108px, 12vw, 134px);
-  display: flex;
-  flex-direction: column;
-  background: rgba(10, 12, 22, 0.6);
-  border: 2px solid var(--tile-color, var(--accent));
-  border-radius: 12px;
-  overflow: hidden;
-  box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.4),
-    0 0 14px -4px var(--tile-color, var(--accent)),
-    0 12px 32px -16px rgba(0, 0, 0, 0.7);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.canvas-page .participant-tile.is-local {
-  box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.4),
-    0 0 22px -3px var(--tile-color, var(--accent)),
-    0 12px 32px -16px rgba(0, 0, 0, 0.7);
-}
-
-.canvas-page .participant-tile .tile-camera {
-  flex: 1 1 auto;
-  position: relative;
-  min-height: 0;
-  background: #000;
-}
-
-.canvas-page .participant-tile .tile-camera video {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  transform: scaleX(-1);
-  display: block;
-}
-
-.canvas-page .participant-tile .tile-placeholder {
-  position: absolute;
-  inset: 0;
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 0.55rem;
 }
-
+.canvas-page .participant-tile .tile-camera {
+  position: relative;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: #11141d;
+  box-shadow: 0 0 0 1.5px var(--tile-color, var(--accent));
+}
+.canvas-page .participant-tile .tile-camera video,
 .canvas-page .participant-tile .tile-photo {
   position: absolute;
   inset: 0;
@@ -768,64 +698,320 @@ input:focus {
   object-fit: cover;
   display: block;
 }
-
-.canvas-page .participant-tile .tile-initials {
-  font: 700 1.1rem system-ui, sans-serif;
-  letter-spacing: 0.04em;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+.canvas-page .participant-tile .tile-camera video { transform: scaleX(-1); }
+.canvas-page .participant-tile .tile-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
-
+.canvas-page .participant-tile .tile-initials {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--tile-color);
+}
 .canvas-page .participant-tile .tile-info {
-  flex: 0 0 auto;
-  padding: 0.25rem 0.55rem;
   display: flex;
   flex-direction: column;
-  gap: 0.05rem;
-  background: rgba(0, 0, 0, 0.45);
+  line-height: 1.2;
   min-width: 0;
 }
-
 .canvas-page .participant-tile .tile-name {
-  font-size: 0.72rem;
+  font-size: 0.82rem;
   color: var(--fg);
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  letter-spacing: 0.01em;
 }
-
-.canvas-page .participant-tile .tile-you {
-  color: var(--fg-dim);
-  font-size: 0.62rem;
-  letter-spacing: 0.04em;
-}
-
+.canvas-page .participant-tile .tile-you { color: var(--fg-dim); }
 .canvas-page .participant-tile .tile-status {
-  font-size: 0.62rem;
-  font-family: ui-monospace, monospace;
-  letter-spacing: 0.04em;
+  font-size: 0.74rem;
+  color: var(--tile-color);
+  white-space: nowrap;
+}
+
+/* ===== Gesture readout ===== */
+.canvas-page .gesture {
+  position: absolute;
+  top: calc(var(--bar-h) + 18px);
+  left: var(--edge);
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.9rem;
+  color: var(--fg-dim);
+  pointer-events: none;
+}
+.canvas-page .gesture b {
+  font-family: var(--font-display);
+  font-weight: 500;
+  color: var(--fg);
+}
+.canvas-page .gesture-glyph {
+  width: 30px;
+  height: 30px;
+  overflow: visible;
+}
+.canvas-page .gesture-ring {
+  fill: none;
+  stroke: var(--accent-3);
+  stroke-width: 1.5;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+.canvas-page .gesture-tip {
+  fill: var(--accent-2);
+  transition: transform 0.18s cubic-bezier(0.2, 0.7, 0.2, 1), fill 0.18s ease, opacity 0.18s ease;
+}
+.canvas-page .gesture.is-open .tip-a { transform: translate(-7px, 3px); }
+.canvas-page .gesture.is-open .tip-b { transform: translate(7px, -3px); }
+.canvas-page .gesture.is-pinch .gesture-tip { fill: var(--accent-3); }
+.canvas-page .gesture.is-pinch .gesture-ring { opacity: 1; }
+.canvas-page .gesture.is-none .gesture-tip { fill: var(--fg-dim); opacity: 0.4; }
+.canvas-page .gesture.is-none .tip-a { transform: translate(-7px, 3px); }
+.canvas-page .gesture.is-none .tip-b { transform: translate(7px, -3px); }
+.canvas-page .gesture.is-none .gesture-ring {
+  stroke: var(--fg-dim);
+  stroke-dasharray: 2 4;
+  opacity: 0.5;
+}
+.canvas-page .gesture.is-none b { color: var(--fg-dim); }
+
+/* ===== Sound layers (right rail) ===== */
+.canvas-page .sound-layers {
+  position: absolute;
+  top: calc(var(--bar-h) + 18px);
+  right: var(--edge);
+  width: var(--rail-w);
+  max-height: calc(100% - var(--bar-h) - 18px - var(--self-w) * 0.75 - var(--edge) - 20px);
+  overflow-y: auto;
+  scrollbar-width: none;
+  z-index: 4;
+  padding: 0 0 0.5rem 1.1rem;
+  border-left: 1px solid var(--hair);
+  background: linear-gradient(to right, rgba(7, 8, 13, 0.7), rgba(7, 8, 13, 0.45));
+}
+.canvas-page .sound-layers::-webkit-scrollbar { display: none; }
+
+.canvas-page .layers-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.canvas-page .layers-title {
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+}
+.canvas-page .layers-status {
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
+.canvas-page .layer-rings {
+  display: flex;
+  gap: 7px;
+  margin-top: 0.7rem;
+}
+.canvas-page .layer-rings .ring {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  transition: background 0.3s ease, border-color 0.3s ease, opacity 0.3s ease;
+}
+.canvas-page .layer-rings .ring.is-playing {
+  background: var(--layer-color);
+  border-color: var(--layer-color);
+}
+.canvas-page .layer-rings .ring.is-fading {
+  background: var(--layer-color);
+  border-color: var(--layer-color);
+  opacity: 0.3;
+}
+.canvas-page .layer-rings .ring.is-muted,
+.canvas-page .layer-rings .ring.is-silent {
+  border-color: var(--layer-color);
+  opacity: 0.6;
+}
+
+.canvas-page .loop-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.8rem 0 0.4rem;
+}
+.canvas-page .loop-steps {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: repeat(16, 1fr);
+  align-items: end;
+  height: 10px;
+}
+.canvas-page .loop-steps i {
+  justify-self: center;
+  width: 1px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.2);
+}
+.canvas-page .loop-steps i.beat { height: 8px; }
+.canvas-page .loop-strip.is-running .loop-steps i.is-now {
+  width: 2px;
+  height: 10px;
+  background: var(--accent);
+}
+.canvas-page .loop-bpm {
+  font-size: 0.7rem;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
+.canvas-page .layer-list { list-style: none; }
+
+.canvas-page .layer {
+  display: grid;
+  grid-template-columns: 12px 44px 1fr 26px 22px;
+  align-items: center;
+  column-gap: 0.6rem;
+  padding: 0.55rem 0.4rem 0.55rem 0;
+  border-top: 1px solid var(--hair);
+  border-radius: 2px;
+  transition: opacity 0.4s ease, background 0.15s ease;
+}
+.canvas-page .layer:hover,
+.canvas-page .layer:focus-visible { background: rgba(255, 255, 255, 0.035); }
+.canvas-page .layer:focus-visible { outline-offset: -2px; }
+
+.canvas-page .layer-num {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--fg-dim);
+  text-align: right;
+}
+.canvas-page .layer-glyph {
+  width: 44px;
+  height: 24px;
+  overflow: visible;
+  opacity: 0.8;
+}
+.canvas-page .layer-glyph path {
+  fill: none;
+  stroke: var(--layer-color);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.canvas-page .layer-glyph circle { fill: var(--layer-color); }
+.canvas-page .layer-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+.canvas-page .layer-name {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-family: var(--font-display);
+  font-size: 0.98rem;
+  font-weight: 500;
+  color: var(--fg);
+}
+.canvas-page .layer-meta {
+  font-size: 0.74rem;
+  color: var(--fg-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
-/* ===== Self-view — floating bottom-right camera (FaceTime-style) ===== */
-.canvas-page .self-view {
-  position: absolute;
-  bottom: 1.25rem;
-  right: 1.25rem;
-  width: clamp(220px, 26vw, 320px);
-  aspect-ratio: 4 / 3;
-  background: #000;
-  border-radius: 16px;
-  overflow: hidden;
-  border: 2px solid var(--user-color, var(--accent));
-  box-shadow:
-    0 0 36px -6px var(--user-color, var(--accent)),
-    0 24px 60px -20px rgba(0, 0, 0, 0.7);
-  z-index: 4;
+.canvas-page .layer-sep { margin: 0 0.3rem; opacity: 0.6; }
+.canvas-page .layer-suggest {
+  font-family: 'Instrument Sans', sans-serif;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: var(--accent-2);
+  border: 1px solid rgba(201, 123, 255, 0.4);
+  border-radius: 3px;
+  padding: 0 0.3rem;
+}
+.canvas-page .layer-actions {
+  grid-column: 3 / -1;
+  display: flex;
+  gap: 0.9rem;
 }
 
+/* Activity: a thin bar that swells on every note, then settles. */
+.canvas-page .layer-meter {
+  position: relative;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+.canvas-page .layer-meter i {
+  position: absolute;
+  inset: 0;
+  background: var(--layer-color);
+  transform-origin: left center;
+  transform: scaleX(0.08);
+  opacity: 0.35;
+}
+
+.canvas-page .layer-mute {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  background: none;
+  border: none;
+  border-radius: 3px;
+}
+.canvas-page .layer-mute svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: var(--fg-dim);
+  stroke-width: 1.2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.canvas-page .layer-mute:disabled { opacity: 0.3; }
+
+/* States: playing is full strength; everything else recedes. */
+.canvas-page .layer.is-fading { opacity: 0.35; }
+.canvas-page .layer.is-muted .layer-glyph,
+.canvas-page .layer.is-silent .layer-glyph { opacity: 0.45; }
+.canvas-page .layer.is-silent .layer-glyph path { stroke-dasharray: 2 3; }
+.canvas-page .layer.is-silent .layer-name,
+.canvas-page .layer.is-muted .layer-name { color: var(--fg-dim); }
+
+.canvas-page .layers-empty {
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--hair);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--fg-dim);
+}
+.canvas-page .layer-list:empty + .layers-empty { border-top: none; padding-top: 0.2rem; }
+
+/* ===== Self-view (smaller, quieter) ===== */
+.canvas-page .self-view {
+  position: absolute;
+  right: var(--edge);
+  bottom: var(--edge);
+  width: var(--self-w);
+  aspect-ratio: 4 / 3;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--user-color, var(--accent)) 60%, transparent);
+  z-index: 4;
+}
 .canvas-page .self-view video,
 .canvas-page .self-view > canvas {
   position: absolute;
@@ -834,252 +1020,215 @@ input:focus {
   height: 100%;
   object-fit: cover;
 }
-
-/* Mirror the video for selfie feel; landmarks (overlay canvas) come from
-   MediaPipe selfieMode and are already mirrored, so the canvas stays unflipped. */
-.canvas-page .self-view video {
-  transform: scaleX(-1);
-}
+/* Video mirrored for selfie feel; the MediaPipe overlay is already mirrored
+   (selfieMode), so the canvas stays unflipped. */
+.canvas-page .self-view video { transform: scaleX(-1); }
 
 .canvas-page .self-view-tracking {
   position: absolute;
-  top: 0.5rem;
-  left: 0.5rem;
-  font-size: 0.7rem;
-  font-family: ui-monospace, monospace;
-  color: var(--fg);
-  background: rgba(0, 0, 0, 0.55);
-  padding: 0.15rem 0.45rem;
-  border-radius: 5px;
+  top: 0.45rem;
+  left: 0.45rem;
+  right: 0.45rem;
   z-index: 2;
+  font-size: 0.74rem;
+  line-height: 1.35;
+  color: var(--fg);
+  background: rgba(0, 0, 0, 0.65);
+  padding: 0.3rem 0.45rem;
+  border-radius: 4px;
 }
+.canvas-page .self-view-tracking.is-error { color: var(--accent-3); }
 
 .canvas-page .self-view-label {
   position: absolute;
-  bottom: 0.55rem;
-  left: 0.55rem;
-  background: rgba(0, 0, 0, 0.6);
-  backdrop-filter: blur(8px);
-  border-radius: 8px;
-  padding: 0.3rem 0.55rem;
-  display: inline-flex;
-  gap: 0.5rem;
-  align-items: baseline;
+  left: 0;
+  right: 0;
+  bottom: 0;
   z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 1.1rem 0.55rem 0.4rem;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.72));
 }
-
 .canvas-page .self-view-name {
-  font-size: 0.78rem;
+  font-size: 0.8rem;
+  font-weight: 500;
   color: var(--fg);
-  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-
 .canvas-page .self-view-status {
-  font-family: ui-monospace, monospace;
-  font-size: 0.66rem;
-  letter-spacing: 0.04em;
-}
-
-/* ===== Controls (bottom-left) ===== */
-.canvas-page .controls {
-  position: absolute;
-  bottom: 1.25rem;
-  left: 1.25rem;
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-  z-index: 5;
-  max-width: calc(100vw - 2.5rem);
-}
-
-/* ===== Active sound layers indicator (top-right under participant row) ===== */
-.canvas-page .layer-indicator {
-  position: absolute;
-  top: calc(var(--row-h) + 1rem);
-  right: 1.25rem;
-  z-index: 4;
-  background: rgba(10, 12, 22, 0.62);
-  backdrop-filter: blur(10px);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 0.55rem 0.9rem;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 0.1rem;
-  pointer-events: none;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-.canvas-page .layer-indicator.at-cap {
-  border-color: rgba(255, 142, 199, 0.55);
-  box-shadow: 0 0 18px -2px rgba(255, 142, 199, 0.45);
-}
-
-.canvas-page .layer-indicator .layer-label {
-  font-size: 0.6rem;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--fg-dim);
-}
-
-.canvas-page .layer-indicator .layer-count {
-  font-family: ui-monospace, monospace;
-  font-size: 1rem;
-  color: var(--fg);
-  letter-spacing: 0.06em;
-}
-
-.canvas-page .layer-indicator .layer-count b {
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.canvas-page .layer-indicator.at-cap .layer-count b {
-  color: var(--accent-3);
-}
-
-/* ===== Debug panel (top-left, under participant row) ===== */
-.canvas-page .debug-panel {
-  position: absolute;
-  top: calc(var(--row-h) + 1rem);
-  left: 1.25rem;
-  background: rgba(0, 0, 0, 0.62);
-  border: 1px solid var(--border);
-  backdrop-filter: blur(10px);
-  border-radius: 12px;
-  padding: 0.65rem 0.9rem;
-  font-family: ui-monospace, monospace;
-  font-size: 0.7rem;
-  color: var(--fg-dim);
-  z-index: 4;
-  display: grid;
-  grid-template-columns: auto;
-  gap: 0.25rem;
-  width: clamp(240px, 22vw, 280px);
-  max-height: calc(100vh - var(--row-h) - 6rem);
-  overflow-y: auto;
-  pointer-events: none;
-}
-
-.canvas-page .debug-panel .row {
-  display: flex;
-  gap: 0.6rem;
-  align-items: baseline;
+  font-size: 0.72rem;
   white-space: nowrap;
 }
-
-.canvas-page .debug-panel .row span {
-  color: var(--fg-dim);
-  min-width: 7rem;
+.canvas-page .self-view-muted {
+  width: 13px;
+  height: 13px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: var(--accent-3);
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-.canvas-page .debug-panel .row b {
+/* ===== Controls ===== */
+.canvas-page .controls {
+  position: absolute;
+  left: var(--edge);
+  bottom: var(--edge);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.9rem 1.4rem;
+  max-width: calc(100% - var(--self-w) - var(--edge) * 3);
+}
+.canvas-page .controls > div {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.canvas-page .controls-primary:empty { display: none; }
+.canvas-page .controls-tertiary {
+  gap: 1.1rem !important;
+  padding-left: 1.4rem;
+  border-left: 1px solid var(--hair);
+}
+
+.canvas-page .controls button.primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.7rem 1.1rem;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #061016;
+  font-size: 0.92rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+.canvas-page .controls button.primary:hover:not(:disabled) {
+  filter: none;
+  background: #a5ebff;
+}
+.canvas-page .controls button.primary:active:not(:disabled) { transform: translateY(1px); }
+.canvas-page .primary-glyph {
+  width: 0;
+  height: 0;
+  border-left: 8px solid currentColor;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+}
+/* Room audio running: the button becomes the quieter "stop" state. */
+.canvas-page .controls button.primary.is-live {
+  background: transparent;
   color: var(--accent);
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
+}
+.canvas-page .controls button.primary.is-live:hover:not(:disabled) {
+  background: rgba(126, 226, 255, 0.1);
+}
+.canvas-page .controls button.primary.is-live .primary-glyph {
+  width: 8px;
+  height: 8px;
+  border: none;
+  background: currentColor;
+  border-radius: 1px;
 }
 
-.canvas-page .debug-panel .row.separator {
-  grid-column: 1 / -1;
-  padding-top: 0.35rem;
-  margin-top: 0.2rem;
-  border-top: 1px solid var(--border);
-}
-
-.canvas-page .debug-panel .row.separator span {
+.canvas-page .controls button.quiet {
+  padding: 0.5rem 0.8rem;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: transparent;
   color: var(--fg);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  font-size: 0.68rem;
+  font-size: 0.85rem;
+  letter-spacing: 0;
 }
-
-.canvas-page .debug-panel .row.separator b {
-  color: var(--fg-dim);
+.canvas-page .controls button.quiet:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.04);
 }
-
-.canvas-page .debug-panel .notes-row {
-  grid-column: 1 / -1;
-  white-space: normal;
-}
-
-.canvas-page .debug-panel .notes-row b {
+.canvas-page .controls button.quiet[aria-pressed='true'] {
+  border-color: var(--accent-3);
   color: var(--accent-3);
 }
 
-/* ===== Responsive breakpoints ===== */
-
-/* Tablet & small laptop: shrink tiles + self-view */
-@media (max-width: 960px) {
-  :root {
-    --row-h: 88px;
-  }
-  .canvas-page .participant-tile {
-    width: 102px;
-  }
-  .canvas-page .self-view {
-    width: clamp(180px, 30vw, 250px);
-    right: 1rem;
-    bottom: 1rem;
-  }
-  .canvas-page .room-chip,
-  .canvas-page .hint-chip {
-    padding: 0.4rem 0.7rem;
-  }
-  .canvas-page .room-chip .code {
-    font-size: 0.88rem;
-  }
+.canvas-page .audio-pending-banner {
+  position: absolute;
+  top: calc(var(--bar-h) + 16px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  padding: 0.55rem 0.95rem;
+  border-radius: 6px;
+  border: 1px solid rgba(126, 226, 255, 0.5);
+  background: rgba(7, 8, 13, 0.92);
+  color: var(--fg);
+  font-size: 0.88rem;
+  letter-spacing: 0;
+}
+.canvas-page .audio-pending-banner b { color: var(--accent); font-weight: 600; }
+.canvas-page .audio-pending-banner:hover:not(:disabled) {
+  background: rgba(20, 24, 38, 0.95);
+  border-color: var(--accent);
+}
+.canvas-page .audio-pending-banner:active:not(:disabled) {
+  transform: translateX(-50%) translateY(1px);
 }
 
-/* Phone-ish: shrink everything, hide hint chip + debug panel for breathing room */
-@media (max-width: 640px) {
-  :root {
-    --row-h: 78px;
-  }
-  .canvas-page .participant-tile {
-    width: 90px;
-  }
-  .canvas-page .participant-tile .tile-name {
-    font-size: 0.66rem;
-  }
-  .canvas-page .participant-tile .tile-status {
-    font-size: 0.58rem;
-  }
-  .canvas-page .self-view {
-    width: clamp(140px, 38vw, 190px);
-    right: 0.6rem;
-    bottom: 0.6rem;
-    border-radius: 12px;
-  }
-  .canvas-page .self-view-label {
-    bottom: 0.35rem;
-    left: 0.35rem;
-    padding: 0.2rem 0.4rem;
-  }
-  .canvas-page .self-view-name { font-size: 0.7rem; }
-  .canvas-page .self-view-status { font-size: 0.6rem; }
-  .canvas-page .hint-chip {
-    display: none; /* trade-off: hint is implicit by now */
-  }
-  .canvas-page .mode-toggle button .key { display: none; }
-  .canvas-page .mode-toggle button { padding: 0.36rem 0.7rem; font-size: 0.72rem; }
-  .canvas-page .debug-panel {
-    display: none; /* desktop diagnostic only */
-  }
-  .canvas-page .controls {
-    bottom: 0.75rem;
-    left: 0.75rem;
-  }
-  .canvas-page .controls button {
-    padding: 0.55rem 0.9rem;
-    font-size: 0.85rem;
-  }
-  .canvas-page .layer-indicator {
-    top: calc(var(--row-h) + 0.6rem);
-    right: 0.6rem;
-    padding: 0.4rem 0.6rem;
-  }
-  .canvas-page .layer-indicator .layer-count {
-    font-size: 0.85rem;
+/* ===== Responsive ===== */
+@media (max-width: 1180px) {
+  .canvas-page { --rail-w: 224px; }
+  .canvas-page .topbar { gap: 1.4rem; }
+  .canvas-page .hint-chip .hint-sub { display: none; }
+  .canvas-page .participant-tile:not(.is-local) .tile-info { display: none; }
+}
+
+@media (max-width: 960px) {
+  .canvas-page { --rail-w: 200px; --self-w: clamp(150px, 20vw, 190px); }
+  .canvas-page .hint-chip { visibility: hidden; }
+  .canvas-page .participant-tile .tile-info { display: none; }
+  .canvas-page .room-chip .label { display: none; }
+  .canvas-page .layer { grid-template-columns: 12px 40px 1fr 22px; }
+  .canvas-page .layer-mute { display: none; }
+  .canvas-page .layer-meta { display: none; }
+}
+
+@media (max-width: 720px) {
+  .canvas-page { --edge: 12px; --bar-h: 56px; --rail-w: 150px; --self-w: clamp(128px, 34vw, 160px); }
+  .canvas-page .wordmark { font-size: 1.15rem; }
+  .canvas-page .topbar { gap: 1rem; }
+  .canvas-page .share-chip { display: none; }
+  .canvas-page .mode-toggle .key { display: none; }
+  .canvas-page .layer-list,
+  .canvas-page .layers-empty,
+  .canvas-page .loop-strip { display: none; }
+  .canvas-page .layers-title { font-size: 0.95rem; }
+  .canvas-page .layers-head { flex-direction: column; gap: 0.1rem; }
+  .canvas-page .sound-layers { padding-bottom: 0.6rem; }
+  .canvas-page .layer-rings { gap: 5px; }
+  .canvas-page .layer-rings .ring { width: 10px; height: 10px; }
+  .canvas-page .controls { gap: 0.6rem 0.9rem; }
+  .canvas-page .controls-tertiary { padding-left: 0.9rem; }
+}
+
+/* Short laptop screens: tighter rows so all eight layers stay visible. */
+@media (max-height: 820px) {
+  .canvas-page .layer { padding: 0.35rem 0.4rem 0.35rem 0; }
+  .canvas-page .loop-strip { margin: 0.6rem 0 0.3rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-page *,
+  .canvas-page *::before,
+  .canvas-page *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
   }
 }

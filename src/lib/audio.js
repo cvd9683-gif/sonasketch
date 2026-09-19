@@ -183,7 +183,7 @@ export function playStroke(strokeId, phrase) {
     if (muted) return
     synth.triggerAttackRelease(ev.note, ev.duration, time, ev.velocity)
     Tone.Draw.schedule(() => {
-      onNotePlayCallback?.(strokeId, ev.x, ev.y)
+      onNotePlayCallback?.(strokeId, ev.x, ev.y, ev.velocity)
     }, time)
   }, events)
   part.loop = true
@@ -234,7 +234,7 @@ export function playDot(dotId, normX, normY) {
     if (muted) return
     pluckSynth.triggerAttackRelease(ev.note, '8n', time, ev.velocity)
     Tone.Draw.schedule(() => {
-      onNotePlayCallback?.(dotId, ev.x, ev.y)
+      onNotePlayCallback?.(dotId, ev.x, ev.y, ev.velocity)
     }, time)
   }, [event])
   part.loop = true
@@ -293,6 +293,24 @@ export function getScheduledEventCount() {
     if (!s.fading) total += s.eventCount
   }
   return total
+}
+
+export function isMasterMuted() { return muted }
+
+// Read-only snapshot of every scheduled layer, oldest first. Fading layers
+// (evicted, ringing out) are included so the UI can let them recede.
+export function getLayers() {
+  const out = []
+  for (const [id, s] of activeStrokes) {
+    out.push({
+      id,
+      type: s.type,
+      synthHint: s.synthHint,
+      eventCount: s.eventCount,
+      fading: !!s.fading,
+    })
+  }
+  return out
 }
 
 export function getAudioStatus() {

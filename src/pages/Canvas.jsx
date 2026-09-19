@@ -12,13 +12,12 @@ import {
   setOnNotePlay,
   setOnStrokeEvicted,
   getLoopPhase,
-  getActiveSoundCount,
-  getScheduledEventCount,
-  getAudioStatus,
+  getLayers,
+  isAudioReady,
+  isMasterMuted,
   disposeAudioEngine,
   stopStrokeSound,
   BPM,
-  MAX_ACTIVE_STROKES,
   MAX_NOTES_PER_STROKE,
 } from '../lib/audio.js'
 import {
@@ -47,6 +46,8 @@ import {
   render,
 } from '../lib/visuals.js'
 import { createPhraseFromStroke } from '../lib/phrase.js'
+import SoundLayers, { MAX_SLOTS } from '../components/SoundLayers.jsx'
+import GestureIndicator from '../components/GestureIndicator.jsx'
 
 // ===== TUNABLE FEEL CONSTANTS =====
 // Adjust these to dial the brush feel. Pixel distances are logical (CSS) px;
@@ -81,7 +82,7 @@ const MAX_MISSING_HAND_FRAMES = 6
 // ----- Dot vs stroke -----
 // While pinching with little movement → dot preview.
 // Once max-movement crosses STROKE_MIN_MOVEMENT, latch into stroke mode.
-const DOT_MAX_MOVEMENT = 28        // soft hint, used by the debug panel
+const DOT_MAX_MOVEMENT = 28        // soft hint (unused since the debug panel was removed)
 const STROKE_MIN_MOVEMENT = 32     // operational latch threshold
 
 // ----- Edit mode -----
@@ -115,21 +116,26 @@ function ShareLinkChip() {
   const isLocal = typeof window !== 'undefined' &&
     /^(localhost|127\.|\[?::1)/.test(window.location.hostname)
   const url = typeof window !== 'undefined' ? window.location.origin : ''
+  const [copied, setCopied] = useState(false)
   const handleCopy = () => {
     if (typeof navigator === 'undefined') return
-    navigator.clipboard?.writeText(url).catch(() => {})
+    navigator.clipboard?.writeText(url)
+      .then(() => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1600)
+      })
+      .catch(() => {})
   }
   return (
     <button
       type="button"
-      className="share-chip"
+      className="share-chip text-btn"
       onClick={handleCopy}
       title={isLocal
         ? 'Open the printed http://192.168.x.x URL on your other laptop'
-        : 'Click to copy this link'}
+        : `Copy ${url}`}
     >
-      <span className="share-label">Share</span>
-      <span className="share-url">{url || 'connecting…'}</span>
+      {copied ? 'Link copied' : 'Copy link'}
     </button>
   )
 }
@@ -142,7 +148,8 @@ function ParticipantTile({ name, color, status, isLocal, avatar, videoEl }) {
   return (
     <div
       className={`participant-tile${isLocal ? ' is-local' : ''}`}
-      style={{ borderColor: color, '--tile-color': color }}
+      style={{ '--tile-color': color }}
+      title={`${name}${isLocal ? ' (you)' : ''} — ${status}`}
     >
       <div className="tile-camera">
         {isLocal ? (
@@ -150,10 +157,7 @@ function ParticipantTile({ name, color, status, isLocal, avatar, videoEl }) {
         ) : avatar ? (
           <img className="tile-photo" src={avatar} alt="" />
         ) : (
-          <div
-            className="tile-placeholder"
-            style={{ background: `linear-gradient(135deg, ${color}55, ${color}10)` }}
-          >
+          <div className="tile-placeholder">
             <span className="tile-initials" style={{ color }}>
               {tileInitials(name)}
             </span>
@@ -169,6 +173,36 @@ function ParticipantTile({ name, color, status, isLocal, avatar, videoEl }) {
       </div>
     </div>
   )
+}
+
+// Miniature of a sketch's own shape for its sound layer row. Points are
+// normalized 0..1; `aspect` restores the canvas proportions first.
+const GLYPH_W = 44
+const GLYPH_H = 24
+function glyphFromPoints(points, aspect) {
+  if (!points || points.length < 2) return { type: 'dot' }
+  const step = Math.max(1, Math.floor(points.length / 28))
+  const pts = []
+  for (let i = 0; i < points.length; i += step) pts.push(points[i])
+  if (pts[pts.length - 1] !== points[points.length - 1]) pts.push(points[points.length - 1])
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const p of pts) {
+    const x = p.x * aspect
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x)
+    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y)
+  }
+  const bw = Math.max(maxX - minX, 1e-4)
+  const bh = Math.max(maxY - minY, 1e-4)
+  const pad = 3
+  const k = Math.min((GLYPH_W - pad * 2) / bw, (GLYPH_H - pad * 2) / bh)
+  const ox = (GLYPH_W - bw * k) / 2
+  const oy = (GLYPH_H - bh * k) / 2
+  const d = pts.map((p, i) => {
+    const x = ((p.x * aspect - minX) * k + ox).toFixed(1)
+    const y = ((p.y - minY) * k + oy).toFixed(1)
+    return `${i ? 'L' : 'M'}${x} ${y}`
+  }).join('')
+  return { type: 'stroke', d }
 }
 
 function tileInitials(name) {
@@ -243,20 +277,33 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
     strokeBegun: false,
   })
 
-  const lastPhrase = useRef({
-    strokePoints: 0,
-    direction: '—',
-    notes: [],
-    phraseLength: 0,
-    smoothness: 0,
-    lengthCategory: '—',
-  })
+  // Open / pinch readout for the gesture indicator. Only pushed into React
+  // state when it changes, so tracking frames don't re-render the page.
+  const [gesture, setGesture] = useState('none') // 'none' | 'open' | 'pinch'
+  const gestureRef = useRef('none')
+  const updateGesture = useCallback((g) => {
+    if (gestureRef.current === g) return
+    gestureRef.current = g
+    setGesture(g)
+  }, [])
 
-  // Debug-panel updates are pure visualization — at 60Hz they cause a
-  // React re-render every frame. Throttle to ~10Hz so the panel stays
-  // useful without being a perf tax during dense drawings.
-  const lastDebugAt = useRef(0)
-  const DEBUG_INTERVAL_MS = 100
+  // ---------- Sound layer panel ----------
+  // slot i (0..7) → sketch id. Slots are sticky so a mark keeps its number
+  // for as long as it sounds; the number is drawn beside the mark on canvas.
+  const slotsRef = useRef(new Array(MAX_SLOTS).fill(null))
+  const [layerSlots, setLayerSlots] = useState(() => new Array(MAX_SLOTS).fill(null))
+  const layerSigRef = useRef('')
+  // Per-id cache of { instrument, notes, glyph } so phrases/paths are
+  // computed once per sketch, not on every poll.
+  const layerInfoCache = useRef(new Map())
+  // id → { row, glyph, meter, ring } DOM nodes, animated on each note.
+  const layerElsRef = useRef(new Map())
+  const playheadRef = useRef(null)
+  const lastStepRef = useRef(-1)
+  const reducedMotionRef = useRef(
+    typeof window !== 'undefined' &&
+      !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
+  )
 
   // Multiplayer wiring. roomApiRef is set when the socket hook is ready;
   // every emit is opportunistic so the canvas works fine offline too.
@@ -288,38 +335,6 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
   const [mode, setMode] = useState('create')
   const modeRef = useRef('create')
   useEffect(() => { modeRef.current = mode }, [mode])
-  const [debug, setDebug] = useState({
-    handDetected: false,
-    pinching: false,
-    pinchDistance: 0,
-    pinchDuration: 0,
-    mode: 'idle',
-    movementPx: 0,
-    rawX: 0,
-    rawY: 0,
-    mappedX: 0,
-    mappedY: 0,
-    canvasW: 0,
-    canvasH: 0,
-    videoW: 0,
-    videoH: 0,
-    mirror: 'selfieMode',
-    speed: 0,
-    cursorDelta: 0,
-    activePoints: 0,
-    visualStrokes: 0,
-    visualDots: 0,
-    activeSounds: 0,
-    scheduledEvents: 0,
-    audioStatus: 'idle',
-    strokePoints: 0,
-    direction: '—',
-    notes: [],
-    phraseLength: 0,
-    smoothness: 0,
-    lengthCategory: '—',
-  })
-
   useEffect(() => { setEnabled(true) }, [])
 
   // ---------- Stage canvas + animation loop ----------
@@ -341,6 +356,7 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
         // Globally unique stroke/dot ids: prefix with this user's id so two
         // clients drawing simultaneously can't collide on numeric counters.
         fieldRef.current.idPrefix = localUser.id
+        fieldRef.current.reducedMotion = reducedMotionRef.current
       } else {
         resizeField(fieldRef.current, canvas.width, canvas.height)
       }
@@ -358,6 +374,18 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
       if (field) {
         step(field, dt)
         render(ctx, field, { loopPhase: getLoopPhase() })
+      }
+      // Loop strip: light the current 16th from the Tone transport. Written
+      // straight to the DOM (only when the step changes) to stay off React.
+      const strip = playheadRef.current
+      if (strip) {
+        const stepIdx = isAudioReady() ? Math.floor(getLoopPhase() * 16) % 16 : -1
+        if (stepIdx !== lastStepRef.current) {
+          const kids = strip.children
+          if (lastStepRef.current >= 0) kids[lastStepRef.current]?.classList.remove('is-now')
+          if (stepIdx >= 0) kids[stepIdx]?.classList.add('is-now')
+          lastStepRef.current = stepIdx
+        }
       }
       frameCount++
       if (now - lastHeartbeat >= 1000) {
@@ -447,15 +475,45 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
     }
   }, [mode])
 
+  // Each scheduled note (real Tone.Part trigger, skipped while muted) pulses
+  // its mark on the canvas AND its row in the sound layer panel.
+  const flashLayer = useCallback((id, velocity = 0.6) => {
+    const els = layerElsRef.current.get(id)
+    if (!els) return
+    const reduce = reducedMotionRef.current
+    const level = Math.max(0.3, Math.min(1, 0.25 + velocity))
+    const ease = 'cubic-bezier(0.2, 0.7, 0.2, 1)'
+    els.meter?.animate(
+      reduce
+        ? [{ opacity: 1 }, { opacity: 0.35 }]
+        : [
+            { transform: `scaleX(${level})`, opacity: 1 },
+            { transform: 'scaleX(0.08)', opacity: 0.35 },
+          ],
+      { duration: 700, easing: ease },
+    )
+    els.glyph?.animate(
+      [{ opacity: 1, strokeWidth: 2.6 }, { opacity: 0.8, strokeWidth: 1.6 }],
+      { duration: 520, easing: ease },
+    )
+    els.ring?.animate(
+      reduce
+        ? [{ opacity: 1 }, { opacity: 0.8 }]
+        : [{ transform: 'scale(1.7)', opacity: 1 }, { transform: 'scale(1)', opacity: 0.8 }],
+      { duration: 480, easing: ease },
+    )
+  }, [])
+
   useEffect(() => {
-    setOnNotePlay((id, nx, ny) => {
+    setOnNotePlay((id, nx, ny, velocity) => {
       const field = fieldRef.current
       if (!field) return
       if (field.dots.has(id)) pulseDot(field, id)
       else pulseStrokeAt(field, id, nx, ny)
+      flashLayer(id, velocity)
     })
     return () => setOnNotePlay(null)
-  }, [])
+  }, [flashLayer])
 
   // When the audio engine evicts a stroke at the cap, keep visual on canvas
   // but transition the meta to soundState='visualOnly' and ask visuals to
@@ -606,8 +664,11 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
       sendStrokeComplete: room.sendStrokeComplete,
       sendStrokeRemove: room.sendStrokeRemove,
       sendStrokesClear: room.sendStrokesClear,
+      sendAudioStart: room.sendAudioStart,
+      sendAudioStop: room.sendAudioStop,
     }
-  }, [room.sendCursor, room.sendStrokeComplete, room.sendStrokeRemove, room.sendStrokesClear])
+  }, [room.sendCursor, room.sendStrokeComplete, room.sendStrokeRemove, room.sendStrokesClear,
+    room.sendAudioStart, room.sendAudioStop])
 
   // ---------- Hand tracking ----------
   // Single-hand mode. The first detected hand is the drawing hand.
@@ -685,17 +746,7 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
           const phrase = createPhraseFromStroke(
             finished.pixelPoints, finished.width, finished.height, BPM,
           )
-          if (phrase) {
-            playStrokePhrase(finished.id, phrase)
-            lastPhrase.current = {
-              strokePoints: finished.pixelPoints.length,
-              direction: phrase.analysis.direction,
-              notes: phrase.notes.map((n) => n.note),
-              phraseLength: phrase.notes.length,
-              smoothness: phrase.analysis.smoothness,
-              lengthCategory: phrase.analysis.lengthCategory,
-            }
-          }
+          if (phrase) playStrokePhrase(finished.id, phrase)
         }
       } else {
         if (field.activeStroke) field.activeStroke = null
@@ -743,6 +794,7 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
       // Only hide the cursor once the grace expires; otherwise leave it where
       // it was so the in-progress stroke doesn't visually flicker.
       if (ps.missingFrames > SIMPLE_HAND_MISSING_GRACE_FRAMES) {
+        updateGesture('none')
         setCursor(field, field.cursor.x, field.cursor.y, {
           visible: false,
           pinching: false,
@@ -834,8 +886,6 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
     const wasPinching = !!ps.wasPinching
     const justStarted = !wasPinching && isPinching
     const justReleased = wasPinching && !isPinching
-    let stepFromLastDbg = 0
-    let distFromStartDbg = 0
 
     if (justStarted) {
       // Pinch-down: prep buffer, show dot preview at anchor.
@@ -857,8 +907,6 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
       const distFromStart = Math.hypot(c.x - ps.startX, c.y - ps.startY)
       ps.maxMovement = Math.max(ps.maxMovement, distFromStart)
       const stepFromLast = Math.hypot(c.x - ps.lastPointX, c.y - ps.lastPointY)
-      stepFromLastDbg = stepFromLast
-      distFromStartDbg = distFromStart
 
       if (ps.maxMovement >= SIMPLE_STROKE_MIN_PX * dpr && !ps.strokeBegun) {
         clearDotPreview(field)
@@ -927,60 +975,11 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
       })
     }
 
-    // Debug snapshot — throttled so we don't re-render at 60Hz.
-    if (now - lastDebugAt.current > DEBUG_INTERVAL_MS) {
-      lastDebugAt.current = now
-      const v = videoRef.current
-      setDebug((d) => ({
-        ...d,
-        handDetected: true,
-        pinching: isPinching,
-        justStarted,
-        justReleased,
-        activeStrokeExists: !!field.activeStroke,
-        nearPinch,
-        pinchPxRaw: Math.round(pinchPxRaw),
-        pinchPxSmooth: Math.round(ps.pinchPxSmooth),
-        pinchDistance: ps.pinchPxSmooth,  // legacy field name kept for any old refs
-        pinchFrames: ps.pinchFrames || 0,
-        mode: isPinching
-          ? (ps.strokeBegun ? 'stroke-preview' : 'dot-preview')
-          : (ps.releaseFrames > 0 ? `releasing(${ps.releaseFrames}/${SIMPLE_PINCH_DROP_GRACE_FRAMES})` : 'idle'),
-        movementPx: Math.round(ps.maxMovement / dpr),
-        distFromStartPx: Math.round(distFromStartDbg / dpr),
-        stepFromLastPx: Math.round(stepFromLastDbg / dpr),
-        strokeEligible: ps.maxMovement >= SIMPLE_STROKE_MIN_PX * dpr,
-        releaseFrames: ps.releaseFrames || 0,
-        missingFrames: ps.missingFrames || 0,
-        holdingStrokeOpen: !!ps.wasPinching,
-        activeStrokePoints: field.activeStroke?.points?.length || 0,
-        lastFinalizedType: ps.lastFinalizedType || '—',
-        lastFinalizedReason: ps.lastFinalizedReason || '—',
-        rawX: lm[8].x,
-        rawY: lm[8].y,
-        rawTargetX: Math.round((c.rawTargetX || 0) / dpr),
-        rawTargetY: Math.round((c.rawTargetY || 0) / dpr),
-        mappedX: Math.round(c.x / dpr),
-        mappedY: Math.round(c.y / dpr),
-        canvasW: Math.round(field.width / dpr),
-        canvasH: Math.round(field.height / dpr),
-        videoW: v ? v.videoWidth : 0,
-        videoH: v ? v.videoHeight : 0,
-        cursorDelta: c.lastDelta,
-        activePoints: ps.points.length,
-        visualStrokes: field.strokes.size,
-        visualDots: field.dots.size,
-        remoteCursors: field.remoteCursors?.size || 0,
-        activeSounds: getActiveSoundCount(),
-        scheduledEvents: getScheduledEventCount(),
-        audioStatus: getAudioStatus(),
-        ...lastPhrase.current,
-      }))
-    }
-  }, [localUser])
+    updateGesture(isPinching ? 'pinch' : 'open')
+  }, [localUser, updateGesture])
 
-  const { status: trackingStatus, error: trackingError, info: cameraInfo } = useHandTracking({
-    videoRef, overlayRef, enabled, onResults, maxNumHands: 1,
+  const { status: trackingStatus, error: trackingError } = useHandTracking({
+    videoRef, overlayRef, enabled, onResults, maxNumHands: 1, debugOverlay: false,
   })
 
   useEffect(() => {
@@ -1015,6 +1014,134 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
     const interval = setInterval(sync, 400)
     return () => { cancelled = true; clearInterval(interval) }
   }, [trackingStatus])
+
+  // ---------- Sound layer polling ----------
+  // Source of truth is the audio engine's scheduled Parts (getLayers). Before
+  // audio is unlocked nothing is scheduled, so the newest sketches are shown
+  // as silent layers instead — the same marks that will sound on start.
+  useEffect(() => {
+    const layerInfo = (meta) => {
+      const cache = layerInfoCache.current
+      let info = cache.get(meta.id)
+      if (info) return info
+      const field = fieldRef.current
+      const aspect = window.innerWidth / Math.max(1, window.innerHeight)
+      if (meta.type === 'dot') {
+        info = { instrument: 'Pluck', notes: 1, glyph: { type: 'dot' } }
+      } else {
+        let instrument = 'Pluck', notes = 0
+        const pts = (meta.points || []).map((p) => ({
+          x: p.x * (field?.width || 1), y: p.y * (field?.height || 1),
+        }))
+        if (field && pts.length >= 2) {
+          const phrase = createPhraseFromStroke(pts, field.width, field.height, BPM)
+          if (phrase) {
+            instrument = phrase.synthHint === 'pad' ? 'Pad' : 'Pluck'
+            notes = Math.min(phrase.notes.length, MAX_NOTES_PER_STROKE)
+          }
+        }
+        info = { instrument, notes, glyph: glyphFromPoints(meta.points, aspect) }
+      }
+      cache.set(meta.id, info)
+      return info
+    }
+
+    const poll = () => {
+      const metas = strokeMeta.current
+      const ready = isAudioReady()
+      const masterMuted = isMasterMuted()
+      const entries = ready
+        ? getLayers()
+            .filter((l) => metas.has(l.id))
+            .map((l) => ({
+              id: l.id,
+              fading: l.fading,
+              instrument: l.synthHint === 'pad' ? 'Pad' : 'Pluck',
+              notes: l.eventCount,
+            }))
+        : [...metas.values()].slice(-MAX_SLOTS).map((m) => ({ id: m.id, fading: false }))
+      const byId = new Map(entries.map((e) => [e.id, e]))
+
+      // Sticky slot assignment: free vanished ids, then place new ones.
+      // Sounding layers may take a slot from one that is fading out.
+      const slots = slotsRef.current
+      for (let i = 0; i < slots.length; i++) {
+        if (slots[i] && !byId.has(slots[i])) slots[i] = null
+      }
+      const placed = new Set(slots.filter(Boolean))
+      for (const e of entries) {
+        if (placed.has(e.id)) continue
+        let i = slots.indexOf(null)
+        if (i < 0 && !e.fading) i = slots.findIndex((id) => byId.get(id)?.fading)
+        if (i < 0) continue
+        slots[i] = e.id
+        placed.add(e.id)
+      }
+
+      const next = slots.map((id, i) => {
+        if (!id) return null
+        const e = byId.get(id)
+        const meta = metas.get(id)
+        const info = layerInfo(meta)
+        return {
+          id,
+          slot: i + 1,
+          type: meta.type,
+          instrument: e.instrument || info.instrument,
+          notes: e.notes ?? info.notes,
+          state: !ready ? 'silent' : e.fading ? 'fading' : masterMuted ? 'muted' : 'playing',
+          color: meta.userColor || '#7ee2ff',
+          glyph: info.glyph,
+          author: meta.isLocal ? 'you' : (meta.userName || 'guest'),
+          suggestion: null,
+        }
+      })
+
+      const field = fieldRef.current
+      if (field) {
+        field.layerLabels = new Map(next.filter(Boolean).map((l) => [l.id, l.slot]))
+        // A row that unmounts never fires mouseleave — drop stale highlights.
+        if (field.highlightId && !field.layerLabels.has(field.highlightId)) field.highlightId = null
+      }
+      for (const id of layerInfoCache.current.keys()) {
+        if (!metas.has(id)) layerInfoCache.current.delete(id)
+      }
+
+      const sig = next.map((l) => (l ? `${l.slot}:${l.id}:${l.state}:${l.instrument}:${l.notes}` : '-')).join('|')
+      if (sig !== layerSigRef.current) {
+        layerSigRef.current = sig
+        setLayerSlots(next)
+      }
+    }
+
+    poll()
+    const interval = setInterval(poll, 150)
+    return () => clearInterval(interval)
+  }, [])
+
+  const registerLayerEls = useCallback((id, key, el) => {
+    const map = layerElsRef.current
+    let entry = map.get(id)
+    if (!el) {
+      if (entry) {
+        delete entry[key]
+        if (!Object.keys(entry).length) map.delete(id)
+      }
+      return
+    }
+    if (!entry) { entry = {}; map.set(id, entry) }
+    entry[key] = el
+  }, [])
+
+  const highlightLayer = useCallback((id) => {
+    const field = fieldRef.current
+    if (field) field.highlightId = id
+  }, [])
+
+  const registerPlayhead = useCallback((el) => {
+    playheadRef.current = el
+    lastStepRef.current = -1
+  }, [])
 
   // ---------- Controls ----------
   // Pending = host has started audio for the room, but local audio is not
@@ -1103,10 +1230,6 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
     if (field) clearStrokes(field)
     clearAllStrokes()
     strokeMeta.current.clear()
-    lastPhrase.current = {
-      strokePoints: 0, direction: '—', notes: [],
-      phraseLength: 0, smoothness: 0, lengthCategory: '—',
-    }
     pinchState.current.lastFinalizedReason = 'manual clear'
     roomApiRef.current?.sendStrokesClear?.()
   }
@@ -1123,10 +1246,11 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
   const localStatus = useMemo(() => {
     if (!audioOn) return 'audio off'
     if (muted) return 'muted'
-    if (mode === 'edit') return debug.pinching ? 'deleting' : 'editing'
-    if (debug.pinching) return 'drawing'
+    const pinching = gesture === 'pinch'
+    if (mode === 'edit') return pinching ? 'deleting' : 'editing'
+    if (pinching) return 'drawing'
     return 'listening'
-  }, [audioOn, muted, debug.pinching, mode])
+  }, [audioOn, muted, gesture, mode])
 
   // Host = first joiner of the room (server-assigned); we are host when our
   // user id matches room.hostId. Falls back to "treat me as host" if there's
@@ -1146,26 +1270,42 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
     const others = list.filter((p) => p.id !== localUser.id)
     return self ? [self, ...others] : [me, ...others]
   }, [room.participants, me, localUser.id])
-  const remoteStrokesCount = useMemo(
-    () => Array.from(strokeMeta.current.values()).filter(m => !m.isLocal).length,
-    [debug.visualStrokes, debug.visualDots],
-  )
+
+  const trackingMessage = trackingStatus === 'ready'
+    ? null
+    : trackingStatus === 'error'
+      ? (trackingError || 'Camera unavailable')
+      : ({
+          idle: 'Starting camera…',
+          requesting: 'Allow camera access to draw',
+          loading: 'Loading hand tracking…',
+        })[trackingStatus] || 'Starting camera…'
+
+  const roomAudioControl = isHost
+    ? (room.audioPlaying
+        ? { label: 'Stop Room Audio', onClick: handleHostStopAudio, title: 'Stop audio for everyone in the room', live: true }
+        : { label: 'Start Room Audio', onClick: handleHostStartAudio, title: 'Start audio for everyone in the room', live: false })
+    : null
 
   return (
-    <div className="canvas-page">
-      <canvas ref={stageRef} className="stage" />
+    <div className={`canvas-page mode-${mode}`}>
+      <canvas ref={stageRef} className="stage" aria-label="Drawing canvas" />
 
-      <header className="participant-row">
-        <div className="room-chip">
-          <span className="label">Room</span>
-          <span className="code">{roomCode}</span>
-          <span
-            className={`live-dot ${room.connected ? 'on' : 'off'}`}
-            title={room.connected ? 'Connected to room' : 'Connecting…'}
-          />
+      <header className="topbar">
+        <div className="topbar-id">
+          <h1 className="wordmark">SonaSketch</h1>
+          <div className="room-chip">
+            <span className="label">Room</span>
+            <span className="code">{roomCode}</span>
+            <span
+              className={`live-dot ${room.connected ? 'on' : 'off'}`}
+              role="img"
+              aria-label={room.connected ? 'Connected to room' : 'Connecting…'}
+              title={room.connected ? 'Connected to room' : 'Connecting…'}
+            />
+            <ShareLinkChip />
+          </div>
         </div>
-        <ShareLinkChip />
-
 
         <div className="mode-toggle" role="tablist" aria-label="Interaction mode">
           <button
@@ -1186,7 +1326,21 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
           </button>
         </div>
 
-        <div className="tiles-scroll">
+        <p className="hint-chip">
+          {mode === 'create' ? (
+            <>
+              <span className="hint-title">Pinch to draw.</span>{' '}
+              <span className="hint-sub">Move to compose.</span>
+            </>
+          ) : (
+            <>
+              <span className="hint-title">Hover to select.</span>{' '}
+              <span className="hint-sub">Pinch to remove.</span>
+            </>
+          )}
+        </p>
+
+        <div className="tiles-scroll" aria-label="People in this room">
           {participantList.map((p) => {
             const isLocal = p.id === localUser.id
             return (
@@ -1202,180 +1356,95 @@ export default function CanvasPage({ roomCode, displayName = 'Guest', avatar = '
             )
           })}
         </div>
-
-        <div className="hint-chip">
-          {mode === 'create' ? (
-            <>
-              <span className="hint-title">Sketch to compose.</span>
-              <span className="hint-sub">Listen to what takes form.</span>
-            </>
-          ) : (
-            <>
-              <span className="hint-title">Hover to select.</span>
-              <span className="hint-sub">Pinch to remove.</span>
-            </>
-          )}
-        </div>
       </header>
 
-      {/* Active sound layers indicator */}
-      <div
-        className={`layer-indicator${debug.activeSounds >= MAX_ACTIVE_STROKES ? ' at-cap' : ''}`}
-        title="When the cap is reached, the oldest sketch fades to visual-only."
-      >
-        <span className="layer-label">Active sound layers</span>
-        <span className="layer-count">
-          <b>{debug.activeSounds}</b>
-          <span> / {MAX_ACTIVE_STROKES}</span>
-        </span>
-      </div>
+      <GestureIndicator state={trackingStatus === 'ready' ? gesture : 'none'} />
+
+      <SoundLayers
+        slots={layerSlots}
+        audioOn={audioOn}
+        muted={muted}
+        bpm={BPM}
+        onHighlight={highlightLayer}
+        registerEls={registerLayerEls}
+        registerPlayhead={registerPlayhead}
+      />
 
       <div
-        className="self-view"
+        className={`self-view${muted ? ' is-muted' : ''}`}
         style={{ '--user-color': me.color }}
       >
         <video ref={videoRef} playsInline muted autoPlay />
         <canvas ref={overlayRef} />
-        {trackingStatus !== 'ready' && (
-          <span className="self-view-tracking">{trackingStatus}</span>
+        {trackingMessage && (
+          <span className={`self-view-tracking${trackingStatus === 'error' ? ' is-error' : ''}`}>
+            {trackingMessage}
+          </span>
         )}
         <div className="self-view-label">
           <span className="self-view-name">{me.name}</span>
           <span className="self-view-status" style={{ color: me.color }}>
             {localStatus}
           </span>
+          {muted && (
+            <svg className="self-view-muted" viewBox="0 0 16 16" role="img" aria-label="Muted">
+              <path d="M2.5 6h2.5l3.5-3v10L5 10H2.5z" />
+              <path d="M11 6l4 4M15 6l-4 4" />
+            </svg>
+          )}
         </div>
       </div>
 
-      <div className="controls">
-        {!audioOn ? (
-          <button className="primary" onClick={handleStartAudio}>Start Audio</button>
-        ) : (
-          <button onClick={handleToggleMute}>{muted ? 'Unmute' : 'Mute'}</button>
-        )}
-        {isHost && !room.audioPlaying && (
-          <button onClick={handleHostStartAudio} title="Start audio for everyone in the room">
-            Start Room Audio
+      <nav className="controls" aria-label="Session controls">
+        <div className="controls-primary">
+          {roomAudioControl ? (
+            <button
+              className={`primary${roomAudioControl.live ? ' is-live' : ''}`}
+              onClick={roomAudioControl.onClick}
+              title={roomAudioControl.title}
+            >
+              <span className="primary-glyph" aria-hidden="true" />
+              {roomAudioControl.label}
+            </button>
+          ) : !audioOn ? (
+            <button className="primary" onClick={handleStartAudio}>
+              <span className="primary-glyph" aria-hidden="true" />
+              Start Audio
+            </button>
+          ) : null}
+        </div>
+
+        <div className="controls-secondary">
+          {!audioOn
+            ? (roomAudioControl && (
+                <button className="quiet" onClick={handleStartAudio} title="Unlock sound on this device only">
+                  Start Audio
+                </button>
+              ))
+            : (
+                <button className="quiet" onClick={handleToggleMute} aria-pressed={muted}>
+                  {muted ? 'Unmute' : 'Mute'}
+                </button>
+              )}
+          <button className="quiet" onClick={handleClear}>Clear Canvas</button>
+        </div>
+
+        <div className="controls-tertiary">
+          <button className="text-btn" onClick={handleClearInactive} title="Remove sketches whose sound has faded out">
+            Clear Inactive
           </button>
-        )}
-        {isHost && room.audioPlaying && (
-          <button onClick={handleHostStopAudio} title="Stop audio for everyone in the room">
-            Stop Room Audio
-          </button>
-        )}
-        <button onClick={handleClearInactive}>Clear Inactive</button>
-        <button onClick={handleClear}>Clear Canvas</button>
-        <button onClick={onLeave}>Back</button>
-      </div>
+          <button className="text-btn" onClick={onLeave}>Back</button>
+        </div>
+      </nav>
 
       {audioPending && (
         <button
           className="audio-pending-banner"
           onClick={tryStartLocalAudio}
         >
-          🔊 Host started audio — <b>tap to join sound</b>
+          The host started room audio — <b>tap to listen</b>
         </button>
       )}
-
-      <div className="debug-panel">
-        <div className="row"><span>hand</span><b>{debug.handDetected ? 'yes' : 'no'}</b></div>
-        <div className="row"><span>pinch active</span><b>{debug.pinching ? 'true' : 'false'}</b></div>
-        <div className="row"><span>pinch distance</span><b>{debug.pinchDistance.toFixed(3)}</b></div>
-        <div className="row"><span>pinch start ≤</span><b>{PINCH_START_THRESHOLD.toFixed(3)}</b></div>
-        <div className="row"><span>pinch end ≥</span><b>{PINCH_END_THRESHOLD.toFixed(3)}</b></div>
-        <div className="row"><span>mode</span><b>{debug.mode}</b></div>
-        <div className="row"><span>movement</span><b>{debug.movementPx}px</b></div>
-        <div className="row"><span>speed</span><b>{debug.speed.toFixed(3)}</b></div>
-        <div className="row"><span>cursor delta</span><b>{debug.cursorDelta?.toFixed(1) || 0}px</b></div>
-        <div className="row"><span>active points</span><b>{debug.activePoints || 0}</b></div>
-        <div className="row separator"><span>camera</span><b>—</b></div>
-        <div className="row"><span>secure context</span><b>{cameraInfo.secureContext ? 'yes' : 'no'}</b></div>
-        <div className="row"><span>mediaDevices</span><b>{cameraInfo.mediaDevicesAvailable ? 'yes' : 'no'}</b></div>
-        <div className="row"><span>permission</span><b>{cameraInfo.permissionState}</b></div>
-        <div className="row"><span>camera active</span><b>{cameraInfo.cameraActive ? 'yes' : 'no'}</b></div>
-        <div className="row"><span>stream tracks</span><b>{cameraInfo.trackCount}</b></div>
-        <div className="row"><span>tracking status</span><b>{trackingStatus}</b></div>
-        <div className="row"><span>camera error</span><b>{trackingError || '—'}</b></div>
-        <div className="row separator"><span>tracking</span><b>—</b></div>
-        <div className="row"><span>raw mp x/y</span><b>{debug.rawX.toFixed(3)}, {debug.rawY.toFixed(3)}</b></div>
-        <div className="row"><span>raw cursor px</span><b>{debug.rawTargetX || 0}, {debug.rawTargetY || 0}</b></div>
-        <div className="row"><span>smoothed x/y</span><b>{debug.mappedX}, {debug.mappedY}</b></div>
-        <div className="row"><span>canvas w/h</span><b>{debug.canvasW}×{debug.canvasH}</b></div>
-        <div className="row"><span>video w/h</span><b>{debug.videoW}×{debug.videoH}</b></div>
-        <div className="row"><span>mirror</span><b>{debug.mirror}</b></div>
-        <div className="row separator"><span>smoothing</span><b>—</b></div>
-        <div className="row"><span>cursor lerp</span><b>0.14</b></div>
-        <div className="row"><span>deadzone</span><b>3 px</b></div>
-        <div className="row"><span>min point dist</span><b>6 px</b></div>
-        <div className="row"><span>stroke threshold</span><b>25 px</b></div>
-        <div className="row separator"><span>pinch detection (px)</span><b>—</b></div>
-        <div className="row" style={{ fontSize: '0.95rem' }}>
-          <span>state</span>
-          <b style={{
-            color: debug.pinching ? '#6dffb1' : (debug.nearPinch ? '#ffd97e' : '#ff6d8e'),
-            fontWeight: 800,
-          }}>
-            {debug.pinching ? 'PINCHED' : (debug.nearPinch ? 'NEAR' : 'OPEN')}
-          </b>
-        </div>
-        <div className="row"><span>raw open/closed</span><b>{(debug.pinchPxRaw || 0) < 45 ? 'CLOSED' : 'OPEN'}</b></div>
-        <div className="row"><span>raw distance</span><b>{debug.pinchPxRaw || 0} px</b></div>
-        <div className="row"><span>smoothed distance</span><b>{debug.pinchPxSmooth || 0} px</b></div>
-        <div className="row"><span>PINCH_START_PX</span><b>45</b></div>
-        <div className="row"><span>PINCH_END_PX</span><b>70</b></div>
-        <div className="row"><span>near-pinch ≤</span><b>100 px</b></div>
-        <div className="row"><span>pinch active</span><b>{debug.pinching ? 'true' : 'false'}</b></div>
-        <div className="row"><span>just started</span><b>{debug.justStarted ? 'true' : 'false'}</b></div>
-        <div className="row"><span>just released</span><b>{debug.justReleased ? 'true' : 'false'}</b></div>
-        <div className="row"><span>activeStroke exists</span><b>{debug.activeStrokeExists ? 'true' : 'false'}</b></div>
-        <div className="row"><span>onset frames</span><b>{debug.pinchFrames || 0} / 2</b></div>
-        <div className="row"><span>missing-hand grace</span><b>10 frames</b></div>
-        <div className="row"><span>release freeze</span><b>120 ms</b></div>
-        <div className="row separator"><span>long-stroke pipeline</span><b>—</b></div>
-        <div className="row"><span>holding stroke open</span><b>{debug.holdingStrokeOpen ? 'true' : 'false'}</b></div>
-        <div className="row"><span>active stroke pts</span><b>{debug.activeStrokePoints || 0}</b></div>
-        <div className="row"><span>dist from start</span><b>{debug.distFromStartPx || 0}px</b></div>
-        <div className="row"><span>step from last</span><b>{debug.stepFromLastPx || 0}px</b></div>
-        <div className="row"><span>stroke eligible</span><b>{debug.strokeEligible ? 'yes' : 'no'}</b></div>
-        <div className="row"><span>pinch lost frames</span><b>{debug.releaseFrames || 0} / 10</b></div>
-        <div className="row"><span>hand missing frames</span><b>{debug.missingFrames || 0} / 10</b></div>
-        <div className="row"><span>last finalized</span><b>{debug.lastFinalizedType || '—'}</b></div>
-        <div className="row"><span>finalized because</span><b>{debug.lastFinalizedReason || '—'}</b></div>
-        <div className="row separator"><span>multiplayer</span><b>—</b></div>
-        <div className="row"><span>socket connected</span><b>{room.connected ? 'yes' : 'no'}</b></div>
-        <div className="row"><span>room code</span><b>{roomCode || '—'}</b></div>
-        <div className="row"><span>local user id</span><b>{localUser.id}</b></div>
-        <div className="row"><span>host id</span><b>{room.hostId || '—'}</b></div>
-        <div className="row"><span>am I host</span><b>{isHost ? 'yes' : 'no'}</b></div>
-        <div className="row"><span>participants</span><b>{participantList.length}</b></div>
-        <div className="row"><span>participant ids</span><b style={{ fontSize: '0.7rem' }}>
-          {participantList.map(p => `${p.name}(${p.id.slice(-4)})`).join(', ')}
-        </b></div>
-        <div className="row"><span>my socket id</span><b style={{ fontSize: '0.7rem' }}>{me.socketId || '—'}</b></div>
-        <div className="row"><span>remote cursors</span><b>{debug.remoteCursors || 0}</b></div>
-        <div className="row"><span>shared drawings</span><b>{strokeMeta.current.size}</b></div>
-        <div className="row"><span>remote drawings</span><b>{remoteStrokesCount}</b></div>
-        <div className="row"><span>room audio state</span><b>{room.audioPlaying ? 'playing' : 'stopped'}</b></div>
-        <div className="row"><span>local audio unlocked</span><b>{audioOn ? 'yes' : 'no'}</b></div>
-        <div className="row"><span>audio pending</span><b>{audioPending ? 'yes' : 'no'}</b></div>
-        <div className="row"><span>scheduled layers</span><b>{debug.activeSounds || 0} / {MAX_ACTIVE_STROKES}</b></div>
-        <div className="row separator"><span>audio</span><b>—</b></div>
-        <div className="row"><span>status</span><b>{debug.audioStatus}</b></div>
-        <div className="row"><span>active sounds</span><b>{debug.activeSounds} / {MAX_ACTIVE_STROKES}</b></div>
-        <div className="row"><span>scheduled events</span><b>{debug.scheduledEvents}</b></div>
-        <div className="row"><span>visual strokes</span><b>{debug.visualStrokes}</b></div>
-        <div className="row"><span>visual dots</span><b>{debug.visualDots}</b></div>
-        <div className="row separator"><span>last stroke</span><b>—</b></div>
-        <div className="row"><span>stroke points</span><b>{debug.strokePoints}</b></div>
-        <div className="row"><span>direction</span><b>{debug.direction}</b></div>
-        <div className="row"><span>length</span><b>{debug.lengthCategory}</b></div>
-        <div className="row"><span>smoothness</span><b>{debug.smoothness.toFixed(2)}</b></div>
-        <div className="row"><span>phrase length</span><b>{debug.phraseLength} / {MAX_NOTES_PER_STROKE}</b></div>
-        <div className="row notes-row">
-          <span>generated notes</span>
-          <b>{debug.notes.length ? debug.notes.join(' · ') : '—'}</b>
-        </div>
-      </div>
     </div>
   )
 }
